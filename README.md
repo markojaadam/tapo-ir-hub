@@ -4,201 +4,218 @@
 [![release][release-badge]][release-url]
 [![license][license-badge]](LICENSE)
 
-A local Home Assistant integration for Tapo H1xx IR hubs such as the H110.
-It discovers every virtual remote stored on the hub, creates readable Home
-Assistant entities, and provides a utility dashboard card for safely viewing,
-learning, creating, and editing IR codes.
+Local control and management for the IR remotes stored on Tapo H1xx hubs such
+as the H110. The integration creates native Home Assistant devices and entities
+for each remote, with dashboard tools for everyday control and IR code
+management.
 
-## Highlights
+## Features
 
-- Reuses Home Assistant's loaded core TP-Link session when available. This
-  credential-free mode prevents competing KLAP sessions and is recommended.
-- Retains direct Tapo credential mode for installations where the core TP-Link
-  integration does not expose the hub.
-- Creates a device per virtual remote, a normalized `button` entity per key,
-  and a standard `remote` entity per profile.
-- Adds a conservative climate entity for AC profiles, based on the AC work in
-  the WhiteEyeYan fork.
-- Bundles and automatically loads `custom:tapo-ir-control-card`.
-- Verifies every create, edit, learn, rename, and delete operation by reading
-  the result back from the hub.
-- Keeps full IR waveforms out of entity states and recorder history.
+- Local communication with the hub; no bridge, MQTT broker, or cloud service
+  required
+- Credential-free connection through Home Assistant's TP-Link integration
+- Direct connection option for installations where a shared TP-Link hub is not
+  available
+- A Home Assistant device for every stored IR remote
+- Readable, normalized button names and stable entity identities
+- Standard `remote` entities with `remote.send_command` support
+- Climate entities for compatible AC profiles
+- Automatic discovery of remotes and buttons
+- Verified creation, editing, learning, renaming, and deletion
+- Two dashboard cards:
+  - **Tapo IR Control Panel** for managing remotes and IR codes
+  - **Tapo IR Card** for button-based remote control
+
+## Requirements
+
+- Home Assistant 2024.6 or newer
+- A Tapo H1xx IR hub reachable on the local network
+- For the recommended connection: a compatible hub configured in Home
+  Assistant's TP-Link integration
+- For a direct connection: the hub IP address and Tapo account credentials
+
+The integration supports the `plugp100` factory layouts used by versions 5.1,
+5.2, and 6.x.
 
 ## Installation
 
-1. Add this repository to HACS as an **Integration** and download it:
+1. Add this repository to HACS as an **Integration**:
 
    [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.][my-hacs-badge]][my-hacs-url]
 
-2. Restart Home Assistant.
-3. Add **Tapo IR Hub**:
+2. Download **Tapo IR Hub** and restart Home Assistant.
+3. Add the integration:
 
    [![Open your Home Assistant instance and start setting up a new integration.][my-config-badge]][my-config-url]
 
-4. Choose a connection:
-   - **Shared TP-Link hub (recommended):** select a compatible hub already
-     loaded by Home Assistant's TP-Link integration. No credentials are stored.
-   - **Direct connection:** enter the hub IP and case-sensitive Tapo account
-     username and password.
+4. Select a connection method:
+   - **Shared TP-Link hub (recommended):** choose a compatible hub already
+     loaded by Home Assistant. Tapo IR Hub stores no credentials and uses the
+     hub's established local session.
+   - **Direct connection:** enter the hub IP address and the case-sensitive
+     Tapo account username and password.
 
-Home Assistant 2024.6 or newer is required.
+Repeat the setup flow for each IR hub.
 
-## Entities and naming
+## Home Assistant devices and entities
 
-The physical hub receives a **Rescan devices** button plus diagnostic sensors.
-Each stored remote becomes a child device containing:
+Each physical hub provides:
+
+- **Rescan devices** button
+- **Discovered devices** diagnostic sensor
+- **Last scan** diagnostic sensor
+
+Each stored IR remote appears as a child device with:
 
 - one `button` entity per saved key;
-- one `remote` entity supporting `remote.send_command`;
-- one climate entity when the profile reports model `AC`.
+- one `remote` entity for use with `remote.send_command`;
+- one climate entity when the remote profile reports model `AC`.
 
-Vendor labels are not trusted blindly. The normalizer:
+Button labels are cleaned and formatted automatically. Control bytes and
+truncated vendor metadata are removed, known protocol names are expanded, and
+acronyms such as TV, USB, and OK remain intact. When a hub supplies only an
+opaque generated identifier, Home Assistant shows a deterministic
+**Unlabeled Button N** name instead of presenting the token as a meaningful
+label. User-assigned entity names remain under Home Assistant's normal entity
+registry control.
 
-- strips NUL and control-byte metadata;
-- expands protocol names such as `NAVIGATE_UP`, `TEMP+`, and `VOL-`;
-- formats all-caps labels while preserving acronyms such as TV, USB, and OK;
-- replaces generated eight-character identifiers with deterministic
-  **Unlabeled Button N** names instead of presenting random tokens as labels;
-- uses protocol key identity, not the editable label, for new unique IDs.
+## Tapo IR Control Panel
 
-Existing entity registry IDs are retained during migration, so changing a
-display label does not needlessly break automations. User-assigned names remain
-under Home Assistant's normal entity-registry control.
-
-## Tapo IR Control Panel card
-
-The integration serves and loads the card automatically. Add it from the
-dashboard card picker or use:
+The management card is bundled with the integration and loaded automatically.
+Add it from the dashboard card picker or use:
 
 ```yaml
 type: custom:tapo-ir-control-card
 title: Tapo IR Control Panel
 ```
 
-The card is intentionally a utility editor rather than a decorative remote.
-It has no transmit action.
+The card is designed for utility rather than remote control. It cannot transmit
+an IR command.
 
-### Existing remote workflow
+### Manage an existing remote
 
 1. Select a remote.
-2. Select one of its buttons or **+ New Button**.
-3. Review or edit the exact stored JSON representation:
+2. Select a saved button or **+ New Button**.
+3. Review, learn, or enter its IR code.
+4. Use the row controls:
+   - **Save** writes the code and verifies it against the hub.
+   - **Plus** creates another button row.
+   - **Refresh** redraws the visualization from the current text.
+   - **Brain** starts IR learning.
+   - **Stop** ends an active learning session.
 
-   ```json
-   {"pwm":26,"pulse":"..."}
-   ```
+Editable waveforms use this representation:
 
-4. Use:
-   - **save** to write and verify the value;
-   - **plus** to add another draft button;
-   - **refresh** to render the current text without saving it;
-   - **brain** to enter receive mode and capture one signal;
-   - **stop** to leave receive mode before its 30-second timeout.
-
-The waveform view is deliberately simple. Numeric pulse trains are drawn as
-alternating marks and spaces. Encoded pulse strings are shown as a byte-level
-shape so users can still compare captures without the card guessing a protocol.
-Some factory-provided Tapo keys are exposed by the hub only as a protocol name
-and PWM value, not as an editable pulse waveform. The card shows that exact
-reference and keeps the button usable; replacing it requires learning or
-pasting a complete waveform first.
-
-### New remote workflow
-
-Choose **+ New Remote**, select the target hub, enter the remote and first
-button names, then enter or learn a code. The backend creates the remote and
-first button as one transaction. A remote is never intentionally left saved
-without at least one verified button; failed first-button writes trigger
-cleanup of the new remote.
-
-### Learning and cleanup
-
-Learning starts the hub's receive mode but does not save or transmit anything.
-The captured code populates the editor and visualizer; the user must explicitly
-save it. The backend always requests `stopIrReceiveMode` on success, error,
-timeout, or manual stop.
-
-The optional trim control removes only explicit leading and trailing zero
-tokens from numeric pulse sequences. It refuses opaque encodings instead of
-guessing where valid signal data ends.
-
-Card management commands are admin-only WebSocket commands authenticated by
-Home Assistant. Full pulse data is returned only on demand to the editor.
-
-## Existing remote-control card
-
-The original `lovelace/tapo-ir-card.js` remains available for users who want a
-button-oriented transmitting remote. It is separate from the control panel and
-must still be installed as described in [lovelace/README.md](lovelace/README.md).
-
-## AC climate support
-
-AC profile parsing and `sendIrCmdByStatus` support incorporate the useful part
-of the WhiteEyeYan fork with safer behavior:
-
-- only the confirmed Cool (`M0`) and Heat (`M1`) mappings are exposed;
-- unsupported modes fail explicitly instead of silently doing nothing;
-- ambient temperature is not fabricated from the target temperature;
-- state is labeled as last-known IR profile state because IR provides no device
-  feedback.
-
-Fan (`auto`, `low`, `high`) and swing (`auto`, `fixed`) mappings are retained
-from the fork. Confirm device behavior before using them in unattended
-automations. The integration refuses partial AC commands until the hub has
-reported all P/M/T/S/D fields; it never fills unknown physical state with
-invented defaults.
-
-## Issue #1 and plugp100 compatibility
-
-Fresh installs of v1.0.2 could fail with:
-
-```text
-No module named 'plugp100.new'
+```json
+{"pwm":26,"pulse":"..."}
 ```
 
-The requirement allowed several `plugp100` releases, but the factory import was
-hard-coded to the layout used only by 5.1.x. The module moved in 5.2 and again
-in 6.0.
+Numeric pulse trains are drawn as alternating marks and spaces. Encoded pulse
+strings receive a byte-level visualization so captures can be compared without
+guessing their protocol.
 
-This tree isolates the import in `compat.py` and supports all known layouts:
+Some factory-provided keys are exposed by the hub only as a protocol name and
+PWM value. These keys remain fully usable for control. The card displays the
+available protocol reference and requires a learned or pasted waveform before
+the saved code can be replaced.
 
-1. `plugp100.devices.factory` (6.0+)
-2. `plugp100.devices.device_factory` (5.2)
-3. `plugp100.new.device_factory` (5.1)
+### Create a remote
 
-The compatible version range remains intentionally non-exact so another Tapo
-integration cannot force a repeated upgrade/downgrade conflict in Home
-Assistant's shared Python environment. Direct mode also retries H110
-auto-detection with the explicit `SMART.TAPOHUB` / H110 / KLAP v2 profile
-reported to work for affected EU hardware.
+Choose **+ New Remote**, select the target hub, and enter the remote name plus
+its first button. The remote is saved only after the first button has been
+written and verified. If that transaction fails, the partially created remote
+is removed.
 
-If direct authentication still fails:
+### Learn an IR code
 
-- preserve the exact capitalization of the Tapo account username;
-- verify the hub is locally reachable;
-- if the hub was onboarded through TP-Link Simple Setup and retained stale
-  credentials, factory-reset it and onboard it directly on an isolated 2.4 GHz
-  network before trying again.
+The brain button places the hub in receive mode for up to 30 seconds. A captured
+signal fills the editor and updates the visualization, but it is not stored
+until **Save** is selected. Receive mode is stopped after capture, timeout,
+error, or a manual stop.
 
-## Architecture and safety
+The optional trim control removes explicit leading and trailing zero tokens
+from numeric pulse sequences. It does not modify opaque encodings.
 
-- **Shared mode:** calls the already-loaded core TP-Link coordinator and its
-  child protocol wrappers. It opens no second connection and stores no Tapo
-  credentials.
-- **Direct mode:** owns one serialized `plugp100` client and reconnects only
-  after an explicit request failure.
-- **Mutations:** lock per configured hub, snapshot before modification, write,
-  refresh, compare exact read-back, and surface any mismatch.
-- **Entity states:** contain command identity and friendly metadata only, not
-  raw pulse strings.
-- **Frontend:** served by Home Assistant as a versioned ES module and talks only
-  through authenticated WebSocket commands.
+Management commands use Home Assistant's authenticated WebSocket API and
+require an administrator account. Full waveform data is requested only while
+using the editor and is not placed in normal entity states.
 
-No telemetry or cloud service is used.
+## Tapo IR Card
+
+The button-oriented card in `lovelace/tapo-ir-card.js` provides a conventional
+remote-control dashboard with grid and handset layouts, automatic device
+discovery, filters, collapsible panels, and diagnostic controls.
+
+Installation and configuration are documented in
+[lovelace/README.md](lovelace/README.md).
+
+## AC climate control
+
+AC profiles expose:
+
+- Off, Cool, and Heat HVAC modes
+- Target temperature
+- Auto, Low, and High fan modes
+- Auto and Fixed swing modes
+
+IR is one-way communication, so the climate entity represents the last known
+profile state rather than measured feedback from the appliance. Ambient
+temperature is not inferred from the target temperature. Commands are sent only
+when the hub has supplied a complete AC state.
+
+Confirm that the profile's fan and swing behavior matches the appliance before
+using those controls in unattended automations.
+
+## Connection modes
+
+### Shared TP-Link session
+
+Shared mode uses the loaded TP-Link coordinator and its child protocol wrappers.
+It opens no additional hub connection and stores no Tapo credentials. This is
+the recommended option when the hub is already available through Home
+Assistant's TP-Link integration.
+
+### Direct connection
+
+Direct mode owns one serialized local `plugp100` connection. Read operations
+may reconnect after a stale session; write and transmit operations are never
+retried automatically.
+
+## Reliability and safety
+
+- Hub mutations are serialized per configured hub.
+- Writes are refreshed and compared with their read-back result.
+- Remote creation is transactional and rolls back incomplete work.
+- Nested protocol failures are surfaced instead of reported as success.
+- AC commands do not fill unknown state with assumed values.
+- Entity states contain command identity and friendly metadata, not raw pulse
+  strings.
+- The management card has no IR transmission API.
+- No telemetry is collected.
+
+## Troubleshooting
+
+### Direct authentication fails
+
+- Preserve the exact capitalization of the Tapo account username.
+- Confirm that the hub IP is reachable from Home Assistant.
+- If TP-Link Simple Setup copied stale credentials to the hub, factory-reset
+  the hub and onboard it directly on an isolated 2.4 GHz network.
+- Prefer the shared TP-Link connection when it is available.
+
+### A button has no editable waveform
+
+Factory remote profiles may expose a key by protocol reference without
+returning its pulse data. The button can still be used normally. Use the brain
+button to learn a replacement waveform before saving changes to that key.
+
+### A new remote or button does not appear
+
+Press **Rescan devices** on the hub or wait for the configured refresh interval.
 
 ## Development
 
-Run the focused dependency-free checks:
+Run the focused checks:
 
 ```text
 python -m unittest discover -s tests -v
@@ -206,7 +223,9 @@ python -m compileall -q custom_components/tapo_ir
 node --check custom_components/tapo_ir/frontend/tapo-ir-control-card.js
 ```
 
-See [CHANGELOG.md](CHANGELOG.md) for the unreleased consolidation details.
+Release history and upgrade-specific details are available in
+[CHANGELOG.md](CHANGELOG.md) and the
+[GitHub releases](https://github.com/Loadst0ne/tapo-ir-hub/releases).
 
 ## License
 

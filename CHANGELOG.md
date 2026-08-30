@@ -1,9 +1,6 @@
 # Changelog
 
-## Unreleased - 2.0.0
-
-This worktree is intentionally unreleased and has not been deployed to Home
-Assistant.
+## 2.0.0 - 2026-08-30
 
 ### Fixed
 
