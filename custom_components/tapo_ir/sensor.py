@@ -9,11 +9,10 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, HUB_MODEL, MANUFACTURER
+from .button import hub_device_info
 from .coordinator import TapoIrCoordinator
 
 
@@ -23,7 +22,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the hub diagnostic sensors."""
-    coordinator: TapoIrCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator: TapoIrCoordinator = entry.runtime_data
     async_add_entities(
         [
             TapoIrDeviceCountSensor(coordinator),
@@ -40,19 +39,13 @@ class _TapoIrHubSensor(CoordinatorEntity[TapoIrCoordinator], SensorEntity):
 
     def __init__(self, coordinator: TapoIrCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, coordinator.hub_id)},
-            name=coordinator.hub_name,
-            manufacturer=MANUFACTURER,
-            model=coordinator.api.hub_model or HUB_MODEL,
-            sw_version=coordinator.api.hub_fw,
-        )
+        self._attr_device_info = hub_device_info(coordinator)
 
 
 class TapoIrDeviceCountSensor(_TapoIrHubSensor):
     """Number of discovered child IR remotes, with a detailed attribute list."""
 
-    _attr_name = "Discovered devices"
+    _attr_translation_key = "discovered_devices"
     _attr_icon = "mdi:remote-tv"
     _attr_state_class = SensorStateClass.MEASUREMENT
 
@@ -82,7 +75,7 @@ class TapoIrDeviceCountSensor(_TapoIrHubSensor):
 class TapoIrLastScanSensor(_TapoIrHubSensor):
     """Timestamp of the most recent successful hub enumeration."""
 
-    _attr_name = "Last scan"
+    _attr_translation_key = "last_scan"
     _attr_icon = "mdi:clock-check-outline"
     _attr_device_class = SensorDeviceClass.TIMESTAMP
 

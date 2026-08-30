@@ -1,23 +1,26 @@
-"""Async access layer for a Tapo IR hub (KLAP/plugp100).
-
-This module is deliberately free of any Home Assistant imports so its parsing and
-naming helpers can be unit-tested standalone. It owns the hub connection, fires
-individual IR keys, and enumerates every child IR remote with its decoded keys.
-
-Nothing here is tied to a specific remote or account: all devices/keys are read
-live from whatever hub the supplied credentials open.
-"""
+"""Async direct-access client for a Tapo H1xx IR hub."""
 from __future__ import annotations
 
 import asyncio
 import base64
+from copy import deepcopy
 import logging
-import re
 from typing import Any
 
-from plugp100.common.credentials import AuthCredential
-from plugp100.new.device_factory import connect, DeviceConnectConfiguration
-from plugp100.api.requests.tapo_request import TapoRequest
+from .ac import AcStateError, build_ac_payload, parse_ac_status
+from .compat import (
+    AuthCredential,
+    DeviceConnectConfiguration,
+    TapoRequest,
+    connect,
+)
+from .const import IR_CATEGORY
+from .naming import (
+    humanize_key_label,
+    humanize_remote_name,
+    slugify,
+)
+from .protocol import ProtocolResponseError, validate_protocol_response
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,71 +30,104 @@ class TapoIrError(Exception):
 
 
 class TapoIrAuthError(TapoIrError):
-    """Raised when the hub rejects the supplied credentials."""
+    """Raised when the hub rejects supplied credentials."""
 
 
 class TapoIrConnectionError(TapoIrError):
     """Raised when the hub cannot be reached or a request fails."""
 
 
-# ----------------------------------------------------------------------------
-# Pure helpers (no I/O, no HA) — safe to unit-test on their own.
-# ----------------------------------------------------------------------------
-def decode_b64(value: str) -> str:
-    """Decode a base64 label, falling back to the raw value."""
-    try:
-        return base64.b64decode(value).decode("utf-8")
-    except Exception:  # noqa: BLE001 - any malformed value falls back
-        return value
-
-
-def slugify(value: str) -> str:
-    """Lower-case, symbol-aware slug used for stable unique ids."""
-    value = (value or "").strip().lower()
-    value = value.replace("+", " plus ").replace("-", " minus ")
-    value = re.sub(r"[^a-z0-9]+", "_", value).strip("_")
-    return value or "key"
-
-
-# Tapo key ids look like 8-char mixed-case alphanumerics (e.g. "Gi4Hp70J").
-_KEY_ID_RE = re.compile(r"^[A-Za-z0-9]{8}$")
-
-
-def _looks_like_junk_nickname(nickname: str, key_names: list[str]) -> bool:
-    """A nickname is 'junk' if empty, equal to one of the device's own key ids,
-    or just shaped like a raw key id (mixed-case 8-char token)."""
-    if not nickname:
-        return True
-    if nickname in set(key_names):
-        return True
-    return bool(
-        _KEY_ID_RE.match(nickname)
-        and any(c.islower() for c in nickname)
-        and any(c.isupper() for c in nickname)
-        and any(c.isdigit() for c in nickname)
-    )
-
-
-def humanize_device_name(
-    device_id: str,
-    nickname: str,
-    key_names: list[str],
+def parse_child_devices(
+    raw: dict[str, Any],
     overrides: dict[str, str] | None = None,
-) -> str:
-    """Resolve a friendly device name without baking in any product:
-    user override (by device_id) -> meaningful hub nickname -> generic fallback.
-    """
-    override = (overrides or {}).get(device_id)
-    if override:
-        return override
-    if not _looks_like_junk_nickname(nickname, key_names):
-        return nickname
-    return f"IR Remote {device_id[-4:]}"
+    *,
+    include_codes: bool = False,
+) -> list[dict[str, Any]]:
+    """Normalize child remotes and their key metadata."""
+    devices: list[dict[str, Any]] = []
+    for child in raw.get("child_device_list", []):
+        if child.get("category") != IR_CATEGORY or not child.get("device_id"):
+            continue
+
+        device_id = str(child["device_id"])
+        key_list = child.get("key_list") or []
+        remote_name = humanize_remote_name(
+            device_id,
+            child.get("nickname"),
+            [str(key.get("name", "")) for key in key_list],
+            overrides,
+        )
+        keys: list[dict[str, Any]] = []
+        used_labels: dict[str, int] = {}
+        used_legacy_slugs: dict[str, int] = {}
+        for position, key in enumerate(key_list, start=1):
+            protocol_name = str(key.get("name") or f"key_{position}")
+            label, label_source = humanize_key_label(
+                protocol_name, key.get("display_name"), position
+            )
+            label_key = label.casefold()
+            used_labels[label_key] = used_labels.get(label_key, 0) + 1
+            if used_labels[label_key] > 1:
+                label = f"{label} ({used_labels[label_key]})"
+            raw_display_name = key.get("display_name", "")
+            try:
+                legacy_label = (
+                    base64.b64decode(raw_display_name).decode("utf-8")
+                    or protocol_name
+                )
+            except Exception:
+                legacy_label = raw_display_name or protocol_name
+            legacy_slug = slugify(legacy_label)
+            used_legacy_slugs[legacy_slug] = (
+                used_legacy_slugs.get(legacy_slug, 0) + 1
+            )
+            if used_legacy_slugs[legacy_slug] > 1:
+                legacy_slug = (
+                    f"{legacy_slug}_{used_legacy_slugs[legacy_slug]}"
+                )
+            parsed_key: dict[str, Any] = {
+                "name": protocol_name,
+                "id": key.get("id"),
+                "label": label,
+                "label_source": label_source,
+                "slug": slugify(label),
+                "legacy_slug": legacy_slug,
+                "icon": pick_icon(label),
+                "order": key.get("order", position),
+                "type": key.get("type"),
+            }
+            if include_codes:
+                parsed_key.update(
+                    {
+                        "display_name": key.get("display_name"),
+                        "pwm": key.get("pwm"),
+                        "pulse": key.get("pulse"),
+                    }
+                )
+            keys.append(parsed_key)
+
+        device: dict[str, Any] = {
+            "device_id": device_id,
+            "name": remote_name,
+            "slug": slugify(remote_name),
+            "model": child.get("model"),
+            "category": child.get("category"),
+            "key_count": child.get("key_sum", len(keys)),
+            "keys": keys,
+        }
+        if child.get("model") == "AC":
+            device["ac_state"] = parse_ac_status(child)
+        devices.append(device)
+
+    devices.sort(key=lambda device: device["name"].casefold())
+    return devices
 
 
-_ICON_HINTS: list[tuple[str, str]] = [
+_ICON_HINTS: tuple[tuple[str, str], ...] = (
     ("power", "mdi:power"),
     ("mute", "mdi:volume-mute"),
+    ("temperature up", "mdi:thermometer-plus"),
+    ("temperature down", "mdi:thermometer-minus"),
     ("cool", "mdi:snowflake"),
     ("heat", "mdi:fire"),
     ("fan", "mdi:fan"),
@@ -100,82 +136,32 @@ _ICON_HINTS: list[tuple[str, str]] = [
     ("settings", "mdi:cog"),
     ("menu", "mdi:menu"),
     ("back", "mdi:arrow-left-circle"),
-    ("select", "mdi:checkbox-marked-circle"),
+    ("return", "mdi:arrow-left-circle"),
     ("ok", "mdi:checkbox-marked-circle"),
     ("up", "mdi:chevron-up"),
     ("down", "mdi:chevron-down"),
     ("left", "mdi:chevron-left"),
     ("right", "mdi:chevron-right"),
-    ("+", "mdi:plus"),
-    ("-", "mdi:minus"),
-    ("hi", "mdi:speedometer"),
-    ("lo", "mdi:speedometer-slow"),
-]
+    ("volume up", "mdi:volume-plus"),
+    ("volume down", "mdi:volume-minus"),
+    ("channel up", "mdi:plus"),
+    ("channel down", "mdi:minus"),
+)
 
 
 def pick_icon(label: str) -> str:
-    """Best-effort Material Design icon for a key label."""
-    low = (label or "").lower()
-    for keyword, icon in _ICON_HINTS:
-        if keyword == low or keyword in low.split():
+    """Choose a conservative Material Design icon from a normalized label."""
+    lowered = label.casefold()
+    for hint, icon in _ICON_HINTS:
+        if lowered == hint or hint in lowered.split():
             return icon
     return "mdi:remote"
 
 
-def parse_child_devices(
-    raw: dict[str, Any], overrides: dict[str, str] | None = None
-) -> list[dict[str, Any]]:
-    """Turn a raw get_child_device_list payload into a clean, sorted list of IR
-    remote devices, each with decoded + slugified keys. Pure function."""
-    devices: list[dict[str, Any]] = []
-    for child in raw.get("child_device_list", []):
-        if child.get("category") != "ir.remote":
-            continue
-        device_id = child["device_id"]
-        key_list = child.get("key_list", [])
-        nickname = humanize_device_name(
-            device_id,
-            decode_b64(child.get("nickname", "")),
-            [k.get("name", "") for k in key_list],
-            overrides,
-        )
-        keys: list[dict[str, Any]] = []
-        seen: dict[str, int] = {}
-        for key in key_list:
-            label = decode_b64(key.get("display_name", "")) or key.get("name", "")
-            key_slug = slugify(label)
-            if key_slug in seen:
-                seen[key_slug] += 1
-                key_slug = f"{key_slug}_{seen[key_slug]}"
-            else:
-                seen[key_slug] = 1
-            keys.append(
-                {
-                    "name": key["name"],  # the id sendIrCmdById needs
-                    "label": label,
-                    "slug": key_slug,
-                    "icon": pick_icon(label),
-                }
-            )
-        devices.append(
-            {
-                "device_id": device_id,
-                "name": nickname,
-                "slug": slugify(nickname),
-                "model": child.get("model"),
-                "key_count": child.get("key_sum", len(keys)),
-                "keys": keys,
-            }
-        )
-    devices.sort(key=lambda d: d["name"].lower())
-    return devices
-
-
-# ----------------------------------------------------------------------------
-# Connection-owning client.
-# ----------------------------------------------------------------------------
 class TapoIrApi:
-    """Owns the hub connection and exposes fire + enumerate."""
+    """Own a direct plugp100 connection and expose the integration API."""
+
+    identifier_domain = "tapo_ir"
 
     def __init__(
         self,
@@ -190,91 +176,187 @@ class TapoIrApi:
         self.overrides = overrides or {}
         self._device: Any = None
         self._lock = asyncio.Lock()
+        self._explicit_h110_profile = False
+        self._raw_children: list[dict[str, Any]] = []
         self.hub_id: str | None = None
-        self.hub_name: str = "Tapo IR Hub"
+        self.hub_name = "Tapo IR Hub"
         self.hub_model: str | None = None
         self.hub_mac: str | None = None
         self.hub_fw: str | None = None
 
     @property
     def host(self) -> str:
+        """Return the hub host."""
         return self._host
+
+    def _connection_config(self) -> Any:
+        kwargs: dict[str, Any] = {
+            "host": self._host,
+            "credentials": AuthCredential(self._username, self._password),
+        }
+        if self._explicit_h110_profile:
+            kwargs.update(
+                {
+                    "device_type": "SMART.TAPOHUB",
+                    "device_model": "H110",
+                    "encryption_type": "KLAP",
+                    "encryption_version": 2,
+                }
+            )
+        return DeviceConnectConfiguration(**kwargs)
 
     async def _get_client(self) -> Any:
         if self._device is None:
-            cfg = DeviceConnectConfiguration(
-                host=self._host,
-                credentials=AuthCredential(self._username, self._password),
-            )
-            self._device = await connect(cfg)
+            self._device = await connect(self._connection_config())
         return self._device.client
 
-    async def _request(self, request: TapoRequest) -> dict[str, Any]:
-        """Execute a raw request, reconnecting on a stale KLAP session.
-
-        A reused KLAP session can desync (surfacing as a decrypt/"Invalid
-        padding" error or a non-success result). On any failure we drop the
-        session and re-handshake before the next attempt.
-        """
-        async with self._lock:
-            last_err: Exception | None = None
-            for _attempt in (1, 2, 3):
-                try:
-                    client = await self._get_client()
-                    res = await client.execute_raw_request(request)
-                    if res.is_success():
-                        return res.get()
-                    last_err = TapoIrConnectionError(str(res.error()))
-                except Exception as err:  # noqa: BLE001
-                    last_err = err
-                self._device = None  # force a fresh handshake next attempt
-            raise TapoIrConnectionError(repr(last_err))
-
-    async def async_connect(self) -> None:
-        """Validate credentials and capture hub identity (id/mac/model/fw)."""
-        try:
-            info = await self._request(TapoRequest.get_device_info())
-        except TapoIrConnectionError as err:
-            msg = str(err).lower()
-            # plugp100 reports bad credentials via the handshake failing; surface
-            # those as an auth error so the config flow shows the right message.
-            if any(
-                token in msg
-                for token in ("auth", "credential", "login", "password", "1501")
-            ):
-                raise TapoIrAuthError(str(err)) from err
-            raise
-        self.hub_id = info.get("device_id") or info.get("mac") or self._host
-        self.hub_mac = info.get("mac")
-        self.hub_model = info.get("model")
-        self.hub_fw = info.get("fw_ver") or info.get("hw_ver")
-        nickname = decode_b64(info.get("nickname", "")) if info.get("nickname") else ""
-        if nickname:
-            self.hub_name = nickname
-
-    async def async_enumerate(self) -> list[dict[str, Any]]:
-        """Return every child IR remote with its decoded keys (sorted)."""
-        raw = await self._request(TapoRequest.get_child_device_list(0))
-        return parse_child_devices(raw, self.overrides)
-
-    async def async_fire(self, device_id: str, key_name: str) -> dict[str, Any]:
-        """Fire a single stored IR key on a child remote."""
-        inner = TapoRequest(
-            method="multipleRequest",
-            params={
-                "requests": [
-                    {"method": "sendIrCmdById", "params": {"name": key_name}}
-                ]
-            },
-        )
-        return await self._request(TapoRequest.control_child(device_id, inner))
-
-    async def async_close(self) -> None:
-        async with self._lock:
-            device = self._device
-            self._device = None
+    async def _async_drop_device(self) -> None:
+        device, self._device = self._device, None
         if device is not None:
             try:
                 await device.client.close()
-            except Exception:  # noqa: BLE001
-                pass
+            except (OSError, RuntimeError, AttributeError):
+                _LOGGER.debug("Failed to close stale plugp100 client", exc_info=True)
+
+    async def _request(
+        self, request: TapoRequest, *, attempts: int = 3
+    ) -> dict[str, Any]:
+        """Execute a request, reconnecting after a stale KLAP session."""
+        async with self._lock:
+            last_error: Exception | None = None
+            for _attempt in range(attempts):
+                try:
+                    client = await self._get_client()
+                    response = await client.execute_raw_request(request)
+                    if response.is_success():
+                        result = response.get()
+                        return result if isinstance(result, dict) else {"result": result}
+                    last_error = TapoIrConnectionError(str(response.error()))
+                except Exception as err:  # plugp100 exposes version-specific errors
+                    last_error = err
+                await self._async_drop_device()
+            raise TapoIrConnectionError(str(last_error)) from last_error
+
+    async def async_connect(self) -> None:
+        """Validate the connection and capture hub identity."""
+        try:
+            info = await self._request(TapoRequest.get_device_info())
+        except TapoIrConnectionError as first_error:
+            message = str(first_error).casefold()
+            if any(token in message for token in ("auth", "credential", "password", "1501")):
+                raise TapoIrAuthError(str(first_error)) from first_error
+
+            # Some H110 EU firmware cannot be auto-detected. Retry once with the
+            # explicit profile confirmed by affected users in issue #1.
+            self._explicit_h110_profile = True
+            try:
+                info = await self._request(TapoRequest.get_device_info())
+            except TapoIrConnectionError as second_error:
+                message = str(second_error).casefold()
+                if any(
+                    token in message
+                    for token in ("auth", "credential", "password", "1501")
+                ):
+                    raise TapoIrAuthError(str(second_error)) from second_error
+                raise second_error from first_error
+
+        self.hub_id = str(info.get("device_id") or info.get("mac") or self._host)
+        self.hub_mac = info.get("mac")
+        self.hub_model = info.get("model")
+        self.hub_fw = info.get("fw_ver") or info.get("hw_ver")
+        nickname = humanize_remote_name(
+            self.hub_id, info.get("nickname"), [], None
+        )
+        if not nickname.startswith("IR Remote "):
+            self.hub_name = nickname
+
+    async def async_get_raw_devices(self) -> list[dict[str, Any]]:
+        """Read and cache the hub's raw IR child records."""
+        raw = await self._request(TapoRequest.get_child_device_list(0))
+        self._raw_children = deepcopy(raw.get("child_device_list") or [])
+        return deepcopy(self._raw_children)
+
+    async def async_enumerate(
+        self, *, include_codes: bool = False
+    ) -> list[dict[str, Any]]:
+        """Return every normalized child IR remote."""
+        children = await self.async_get_raw_devices()
+        return parse_child_devices(
+            {"child_device_list": children},
+            self.overrides,
+            include_codes=include_codes,
+        )
+
+    async def async_query_hub(
+        self, method: str, params: Any = None
+    ) -> dict[str, Any]:
+        """Run a raw hub method through the existing direct session."""
+        attempts = 3 if method.startswith("get") else 1
+        response = await self._request(
+            TapoRequest(method=method, params=params),
+            attempts=attempts,
+        )
+        try:
+            validate_protocol_response(response, method)
+        except ProtocolResponseError as err:
+            raise TapoIrConnectionError(str(err)) from err
+        if method in response and isinstance(response[method], dict):
+            return response[method]
+        return response
+
+    async def async_query_child(
+        self,
+        device_id: str,
+        method: str,
+        params: Any = None,
+        *,
+        batched: bool = False,
+    ) -> dict[str, Any]:
+        """Run a raw method against one IR child."""
+        request = TapoRequest(method=method, params=params)
+        if batched:
+            request = TapoRequest(
+                method="multipleRequest",
+                params={"requests": [{"method": method, "params": params}]},
+            )
+        attempts = 3 if method.startswith("get") else 1
+        response = await self._request(
+            TapoRequest.control_child(device_id, request),
+            attempts=attempts,
+        )
+        try:
+            validate_protocol_response(response, method)
+        except ProtocolResponseError as err:
+            raise TapoIrConnectionError(str(err)) from err
+        if method in response and isinstance(response[method], dict):
+            return response[method]
+        return response
+
+    async def async_fire(self, device_id: str, key_name: str) -> dict[str, Any]:
+        """Fire a single stored IR key."""
+        return await self.async_query_child(
+            device_id,
+            "sendIrCmdById",
+            {"name": key_name},
+            batched=True,
+        )
+
+    async def async_control_ac(
+        self,
+        device_id: str,
+        *,
+        current_state: dict[str, int],
+    ) -> dict[str, Any]:
+        """Send one complete AC state through the remote profile."""
+        try:
+            payload = build_ac_payload(current_state)
+        except AcStateError as err:
+            raise TapoIrConnectionError(str(err)) from err
+        return await self.async_query_child(
+            device_id, "sendIrCmdByStatus", payload, batched=True
+        )
+
+    async def async_close(self) -> None:
+        """Close the direct client."""
+        async with self._lock:
+            await self._async_drop_device()

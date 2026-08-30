@@ -2,57 +2,87 @@
   "config": {
     "step": {
       "user": {
-        "title": "Connect to your Tapo IR hub",
-        "description": "Enter the hub's local IP address and your Tapo (TP-Link) account credentials. Everything is read live from the hub \u2014 nothing is tied to a specific remote or product.",
+        "title": "Choose a Tapo IR hub",
+        "description": "Reuse a loaded Home Assistant TP-Link hub session (recommended), or choose direct credentials. Shared mode stores no credentials and avoids competing KLAP sessions.",
+        "data": {
+          "tplink_entry_id": "Hub connection"
+        }
+      },
+      "direct": {
+        "title": "Connect directly to a Tapo IR hub",
+        "description": "Enter the hub IP and case-sensitive Tapo account credentials. Direct mode is retained for installations where the core TP-Link integration does not expose the hub.",
         "data": {
           "host": "Host (IP address)",
-          "username": "Tapo account email",
+          "username": "Tapo account email (case-sensitive)",
           "password": "Tapo account password"
         }
       },
       "reauth_confirm": {
         "title": "Re-authenticate your Tapo IR hub",
-        "description": "Your Tapo credentials for the hub at {host} were rejected. Enter them again.",
+        "description": "Credentials for the hub at {host} were rejected.",
         "data": {
-          "username": "Tapo account email",
+          "username": "Tapo account email (case-sensitive)",
           "password": "Tapo account password"
         }
       },
       "reconfigure": {
         "title": "Reconfigure your Tapo IR hub",
-        "description": "Update the hub's IP address or your Tapo account credentials. The changes are validated against the same hub before they are saved.",
+        "description": "Choose the same shared hub again, or update and validate direct connection details.",
         "data": {
+          "tplink_entry_id": "Hub connection",
           "host": "Host (IP address)",
-          "username": "Tapo account email",
+          "username": "Tapo account email (case-sensitive)",
           "password": "Tapo account password"
         }
       }
     },
     "error": {
-      "cannot_connect": "Failed to connect to the hub. Check the IP address and that the hub is reachable on your network.",
-      "invalid_auth": "Invalid Tapo account credentials.",
+      "cannot_connect": "Failed to connect. Check the hub address, availability, and onboarding state.",
+      "invalid_auth": "Invalid Tapo account credentials. The username is case-sensitive.",
+      "shared_hub_unavailable": "The selected core TP-Link hub is no longer loaded.",
       "unknown": "Unexpected error. Check the logs for details."
     },
     "abort": {
       "already_configured": "This Tapo IR hub is already configured.",
+      "reauth_not_required": "Shared-session hubs do not store credentials.",
       "reauth_successful": "Re-authentication was successful.",
       "reconfigure_successful": "The Tapo IR hub was reconfigured successfully.",
-      "wrong_hub": "Those credentials connect to a different Tapo IR hub than the one being reconfigured."
+      "wrong_hub": "The selected connection belongs to a different hub."
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "Tapo IR hub options",
-        "description": "Set how often the hub is re-queried for new or renamed remotes, and optionally override device names. Overrides are JSON mapping a child device_id to a friendly name, e.g. {\"802...0002\": \"Living Room AC\"}.",
+        "description": "Set the refresh interval and optional JSON device-name overrides.",
         "data": {
-          "scan_interval": "Re-query interval (seconds)",
+          "scan_interval": "Refresh interval (seconds)",
           "name_overrides": "Name overrides (JSON, optional)"
         }
       }
     },
     "error": {
-      "invalid_overrides": "Name overrides must be a JSON object mapping device_id to a name."
+      "invalid_overrides": "Name overrides must be a JSON object mapping device IDs to names."
+    }
+  },
+  "entity": {
+    "button": {
+      "rescan_devices": {
+        "name": "Rescan devices"
+      }
+    },
+    "sensor": {
+      "discovered_devices": {
+        "name": "Discovered devices"
+      },
+      "last_scan": {
+        "name": "Last scan"
+      }
+    },
+    "climate": {
+      "air_conditioner": {
+        "name": "Air conditioner"
+      }
     }
   }
 }

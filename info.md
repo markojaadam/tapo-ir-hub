@@ -1,15 +1,13 @@
 # Tapo IR Hub
 
-Native Home Assistant integration for the **Tapo H1xx IR hub** (e.g. H110).
-Talks to the hub locally over KLAP — no bridge, add-on or MQTT — and exposes:
+Local control and management for Tapo H1xx IR hubs.
 
-- the **hub** as a device (with a **Rescan** button + diagnostic sensors),
-- each **child IR remote** as its own device,
-- each **mapped key** as a `button` entity that fires the stored IR code.
+- Credential-free shared TP-Link session mode
+- Direct mode compatible with plugp100 5.1, 5.2, and 6.0
+- Readable remote and button entity names
+- Standard remote entities and conservative AC climate support
+- Bundled Tapo IR Control Panel card for safe code editing and learning
+- Verified create, update, rename, learn, and delete transactions
 
-A background task re-queries the hub so new/renamed remotes appear
-automatically. An optional custom **Lovelace card** (`lovelace/tapo-ir-card.js`)
-renders each remote's keys as tappable buttons in a grid or handset layout.
-
-After downloading, **restart Home Assistant**, then add the integration with
-your hub's local IP and your Tapo account credentials.
+The utility card never transmits IR. It captures and edits codes only, and
+requires an explicit save before changing hub data.

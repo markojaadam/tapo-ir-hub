@@ -1,12 +1,14 @@
 {
   "domain": "tapo_ir",
   "name": "Tapo IR Hub",
+  "after_dependencies": ["tplink"],
   "codeowners": ["@Loadst0ne"],
   "config_flow": true,
+  "dependencies": ["frontend", "http"],
   "documentation": "https://github.com/Loadst0ne/tapo-ir-hub",
   "integration_type": "hub",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/Loadst0ne/tapo-ir-hub/issues",
   "requirements": ["plugp100>=5.1.7,<7.0.0.dev0"],
-  "version": "1.0.2"
+  "version": "2.0.0"
 }

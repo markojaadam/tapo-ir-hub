@@ -1,4 +1,4 @@
-"""Button platform: one button per IR key, plus a hub Rescan button."""
+"""Button entities for stored IR keys and hub rescans."""
 from __future__ import annotations
 
 from typing import Any
@@ -6,19 +6,19 @@ from typing import Any
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, HUB_MODEL, MANUFACTURER, REMOTE_MODEL
+from .const import HUB_MODEL, MANUFACTURER, REMOTE_MODEL
 from .coordinator import TapoIrCoordinator
 
 
-def _hub_device_info(coordinator: TapoIrCoordinator) -> DeviceInfo:
-    """Identity for the hub itself (the system-wide controller device)."""
+def hub_device_info(coordinator: TapoIrCoordinator) -> DeviceInfo:
+    """Return the registry identity for the physical hub."""
     return DeviceInfo(
-        identifiers={(DOMAIN, coordinator.hub_id)},
+        identifiers={(coordinator.identifier_domain, coordinator.hub_id)},
         name=coordinator.hub_name,
         manufacturer=MANUFACTURER,
         model=coordinator.api.hub_model or HUB_MODEL,
@@ -26,17 +26,26 @@ def _hub_device_info(coordinator: TapoIrCoordinator) -> DeviceInfo:
     )
 
 
-def _child_device_info(
+def child_device_info(
     coordinator: TapoIrCoordinator, device: dict[str, Any]
 ) -> DeviceInfo:
-    """Identity for a child IR remote, linked to the hub via via_device."""
+    """Return the registry identity for one virtual remote."""
+    namespace = coordinator.identifier_domain
     return DeviceInfo(
-        identifiers={(DOMAIN, device["device_id"])},
+        identifiers={(namespace, device["device_id"])},
         name=device["name"],
         manufacturer=MANUFACTURER,
         model=device.get("model") or REMOTE_MODEL,
-        via_device=(DOMAIN, coordinator.hub_id),
+        via_device=(namespace, coordinator.hub_id),
     )
+
+
+def key_unique_id(device_id: str, key: dict[str, Any]) -> str:
+    """Build an ID from protocol identity rather than a mutable label."""
+    identity = key.get("id")
+    if identity in (None, -1):
+        identity = key["name"]
+    return f"{device_id}_key_{identity}"
 
 
 async def async_setup_entry(
@@ -44,11 +53,9 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the hub Rescan button and dynamically-discovered IR key buttons."""
-    coordinator: TapoIrCoordinator = hass.data[DOMAIN][entry.entry_id]
-
+    """Set up key buttons and discover newly learned keys."""
+    coordinator: TapoIrCoordinator = entry.runtime_data
     async_add_entities([TapoIrRescanButton(coordinator)])
-
     known: set[str] = set()
 
     @callback
@@ -56,12 +63,17 @@ async def async_setup_entry(
         new_entities: list[TapoIrKeyButton] = []
         for device in (coordinator.data or {}).values():
             for key in device["keys"]:
-                unique_id = f"{device['device_id']}_{key['slug']}"
+                unique_id = key_unique_id(device["device_id"], key)
                 if unique_id in known:
                     continue
                 known.add(unique_id)
                 new_entities.append(
-                    TapoIrKeyButton(coordinator, device, key, unique_id)
+                    TapoIrKeyButton(
+                        coordinator,
+                        device,
+                        key,
+                        unique_id,
+                    )
                 )
         if new_entities:
             async_add_entities(new_entities)
@@ -71,7 +83,7 @@ async def async_setup_entry(
 
 
 class TapoIrKeyButton(CoordinatorEntity[TapoIrCoordinator], ButtonEntity):
-    """A single stored IR key, fired via sendIrCmdById."""
+    """A stored IR key."""
 
     _attr_has_entity_name = True
 
@@ -88,32 +100,59 @@ class TapoIrKeyButton(CoordinatorEntity[TapoIrCoordinator], ButtonEntity):
         self._attr_unique_id = unique_id
         self._attr_name = key["label"]
         self._attr_icon = key["icon"]
-        self._attr_device_info = _child_device_info(coordinator, device)
+        self._attr_device_info = child_device_info(coordinator, device)
+
+    def _current_key(self) -> dict[str, Any] | None:
+        device = (self.coordinator.data or {}).get(self._device_id)
+        if device is None:
+            return None
+        return next(
+            (
+                key
+                for key in device["keys"]
+                if key["name"] == self._key_name
+            ),
+            None,
+        )
 
     @property
     def available(self) -> bool:
-        """Available while its parent device is still present in the scan."""
-        return (
-            super().available
-            and self._device_id in (self.coordinator.data or {})
-        )
+        return super().available and self._current_key() is not None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose identity metadata, never the large waveform."""
+        key = self._current_key() or {}
+        return {
+            "protocol_name": self._key_name,
+            "label_source": key.get("label_source"),
+        }
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        if key := self._current_key():
+            self._attr_name = key["label"]
+            self._attr_icon = key["icon"]
+        self.async_write_ha_state()
 
     async def async_press(self) -> None:
         await self.coordinator.async_fire(self._device_id, self._key_name)
 
 
-class TapoIrRescanButton(CoordinatorEntity[TapoIrCoordinator], ButtonEntity):
-    """Hub-level button that forces an immediate re-query of the hub."""
+class TapoIrRescanButton(
+    CoordinatorEntity[TapoIrCoordinator], ButtonEntity
+):
+    """Force an immediate read-only refresh."""
 
     _attr_has_entity_name = True
-    _attr_name = "Rescan devices"
+    _attr_translation_key = "rescan_devices"
     _attr_icon = "mdi:magnify-scan"
     _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(self, coordinator: TapoIrCoordinator) -> None:
         super().__init__(coordinator)
         self._attr_unique_id = f"{coordinator.hub_id}_rescan"
-        self._attr_device_info = _hub_device_info(coordinator)
+        self._attr_device_info = hub_device_info(coordinator)
 
     async def async_press(self) -> None:
         await self.coordinator.async_request_refresh()

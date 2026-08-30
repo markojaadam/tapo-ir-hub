@@ -1,10 +1,4 @@
-"""Config & options flow for the Tapo IR Hub integration.
-
-Every form re-renders with the user's most recent input as *suggested values*
-(via :meth:`add_suggested_values_to_schema`) so a validation error never wipes
-what someone just typed. The integration supports the full set of UI tools:
-initial setup, reauthentication, reconfiguration, and an options dialog.
-"""
+"""Config and options flows for Tapo IR Hub."""
 from __future__ import annotations
 
 import json
@@ -19,12 +13,15 @@ from homeassistant.config_entries import (
     ConfigFlowResult,
     OptionsFlow,
 )
-from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import callback
 from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+    SelectOptionDict,
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
@@ -32,18 +29,26 @@ from homeassistant.helpers.selector import (
 
 from .api import TapoIrApi, TapoIrAuthError, TapoIrError
 from .const import (
+    CONF_CONNECTION_MODE,
+    CONF_HOST,
     CONF_NAME_OVERRIDES,
+    CONF_PASSWORD,
     CONF_SCAN_INTERVAL,
+    CONF_TPLINK_ENTRY_ID,
+    CONF_USERNAME,
+    CONNECTION_MODE_DIRECT,
+    CONNECTION_MODE_SHARED,
     DEFAULT_SCAN_INTERVAL,
+    DIRECT_CONNECTION_OPTION,
     DOMAIN,
     MIN_SCAN_INTERVAL,
 )
+from .shared_api import SharedHub, discover_shared_hubs
 
 _LOGGER = logging.getLogger(__name__)
 
 
 def _connection_schema() -> vol.Schema:
-    """Host + credentials, with masked password and email-typed username."""
     return vol.Schema(
         {
             vol.Required(CONF_HOST): TextSelector(),
@@ -58,7 +63,6 @@ def _connection_schema() -> vol.Schema:
 
 
 def _credentials_schema() -> vol.Schema:
-    """Username + password only (used for reauth)."""
     return vol.Schema(
         {
             vol.Required(CONF_USERNAME): TextSelector(
@@ -72,7 +76,6 @@ def _credentials_schema() -> vol.Schema:
 
 
 def _options_schema() -> vol.Schema:
-    """Scan interval (number box) + free-text JSON name overrides."""
     return vol.Schema(
         {
             vol.Required(CONF_SCAN_INTERVAL): NumberSelector(
@@ -91,8 +94,36 @@ def _options_schema() -> vol.Schema:
     )
 
 
-async def _validate(data: dict[str, Any]) -> TapoIrApi:
-    """Try to connect and enumerate; raises on failure."""
+def _shared_schema(
+    hubs: list[SharedHub], *, include_direct: bool = True
+) -> vol.Schema:
+    options = [
+        SelectOptionDict(
+            value=hub.entry_id,
+            label=f"{hub.name} ({hub.host or 'local'})",
+        )
+        for hub in hubs
+    ]
+    if include_direct:
+        options.append(
+            SelectOptionDict(
+                value=DIRECT_CONNECTION_OPTION,
+                label="Connect directly with Tapo credentials",
+            )
+        )
+    return vol.Schema(
+        {
+            vol.Required(CONF_TPLINK_ENTRY_ID): SelectSelector(
+                SelectSelectorConfig(
+                    options=options,
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            )
+        }
+    )
+
+
+async def _validate_direct(data: dict[str, Any]) -> TapoIrApi:
     api = TapoIrApi(
         host=data[CONF_HOST],
         username=data[CONF_USERNAME],
@@ -101,13 +132,13 @@ async def _validate(data: dict[str, Any]) -> TapoIrApi:
     try:
         await api.async_connect()
         await api.async_enumerate()
-    finally:
+        return api
+    except Exception:
         await api.async_close()
-    return api
+        raise
 
 
 def _validate_overrides(raw: str) -> str | None:
-    """Return an error key if the overrides string isn't a JSON object."""
     raw = (raw or "").strip()
     if not raw:
         return None
@@ -119,40 +150,68 @@ def _validate_overrides(raw: str) -> str | None:
 
 
 class TapoIrConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Handle the UI config flow (setup, reauth, reconfigure)."""
+    """Configure shared-session or direct access to one IR hub."""
 
-    VERSION = 1
-
-    async def _try_connect(
-        self, user_input: dict[str, Any]
-    ) -> tuple[TapoIrApi | None, dict[str, str]]:
-        """Validate credentials, mapping failures to form error keys."""
-        errors: dict[str, str] = {}
-        api: TapoIrApi | None = None
-        try:
-            api = await _validate(user_input)
-        except TapoIrAuthError:
-            errors["base"] = "invalid_auth"
-        except TapoIrError:
-            errors["base"] = "cannot_connect"
-        except Exception:  # noqa: BLE001
-            _LOGGER.exception("Unexpected error validating Tapo IR hub")
-            errors["base"] = "unknown"
-        return api, errors
+    VERSION = 2
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        errors: dict[str, str] = {}
+        hubs = discover_shared_hubs(self.hass)
+        if not hubs:
+            return await self.async_step_direct(user_input)
         if user_input is not None:
-            api, errors = await self._try_connect(user_input)
-            if api is not None:
-                await self.async_set_unique_id(api.hub_id)
-                self._abort_if_unique_id_configured()
-                return self.async_create_entry(title=api.hub_name, data=user_input)
-
+            selected = user_input[CONF_TPLINK_ENTRY_ID]
+            if selected == DIRECT_CONNECTION_OPTION:
+                return await self.async_step_direct()
+            hub = next((item for item in hubs if item.entry_id == selected), None)
+            if hub is None:
+                return self.async_show_form(
+                    step_id="user",
+                    data_schema=_shared_schema(hubs, include_direct=False),
+                    errors={"base": "shared_hub_unavailable"},
+                )
+            await self.async_set_unique_id(hub.hub_id)
+            self._abort_if_unique_id_configured()
+            return self.async_create_entry(
+                title=hub.name,
+                data={
+                    CONF_CONNECTION_MODE: CONNECTION_MODE_SHARED,
+                    CONF_TPLINK_ENTRY_ID: hub.entry_id,
+                },
+            )
         return self.async_show_form(
             step_id="user",
+            data_schema=_shared_schema(hubs),
+        )
+
+    async def async_step_direct(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+        if user_input is not None and CONF_HOST in user_input:
+            try:
+                api = await _validate_direct(user_input)
+            except TapoIrAuthError:
+                errors["base"] = "invalid_auth"
+            except TapoIrError:
+                errors["base"] = "cannot_connect"
+            except Exception:
+                _LOGGER.exception("Unexpected error validating Tapo IR hub")
+                errors["base"] = "unknown"
+            else:
+                await self.async_set_unique_id(api.hub_id)
+                self._abort_if_unique_id_configured()
+                await api.async_close()
+                return self.async_create_entry(
+                    title=api.hub_name,
+                    data={
+                        **user_input,
+                        CONF_CONNECTION_MODE: CONNECTION_MODE_DIRECT,
+                    },
+                )
+        return self.async_show_form(
+            step_id="direct",
             data_schema=self.add_suggested_values_to_schema(
                 _connection_schema(), user_input or {}
             ),
@@ -162,6 +221,8 @@ class TapoIrConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_reauth(
         self, entry_data: dict[str, Any]
     ) -> ConfigFlowResult:
+        if entry_data.get(CONF_CONNECTION_MODE) == CONNECTION_MODE_SHARED:
+            return self.async_abort(reason="reauth_not_required")
         return await self.async_step_reauth_confirm()
 
     async def async_step_reauth_confirm(
@@ -171,12 +232,17 @@ class TapoIrConfigFlow(ConfigFlow, domain=DOMAIN):
         entry = self._get_reauth_entry()
         if user_input is not None:
             merged = {**entry.data, **user_input}
-            api, errors = await self._try_connect(merged)
-            if api is not None:
+            try:
+                api = await _validate_direct(merged)
+            except TapoIrAuthError:
+                errors["base"] = "invalid_auth"
+            except TapoIrError:
+                errors["base"] = "cannot_connect"
+            else:
                 await self.async_set_unique_id(api.hub_id)
                 self._abort_if_unique_id_mismatch(reason="wrong_hub")
+                await api.async_close()
                 return self.async_update_reload_and_abort(entry, data=merged)
-
         suggested = {CONF_USERNAME: entry.data.get(CONF_USERNAME, "")}
         if user_input:
             suggested.update(user_input)
@@ -192,16 +258,62 @@ class TapoIrConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Let the user change host/credentials without removing the entry."""
-        errors: dict[str, str] = {}
         entry = self._get_reconfigure_entry()
+        if entry.data.get(CONF_CONNECTION_MODE) == CONNECTION_MODE_SHARED:
+            hubs = discover_shared_hubs(self.hass)
+            if user_input is not None:
+                selected = user_input[CONF_TPLINK_ENTRY_ID]
+                hub = next(
+                    (item for item in hubs if item.entry_id == selected), None
+                )
+                if hub is None:
+                    return self.async_show_form(
+                        step_id="reconfigure",
+                        data_schema=_shared_schema(hubs),
+                        errors={"base": "shared_hub_unavailable"},
+                    )
+                await self.async_set_unique_id(hub.hub_id)
+                self._abort_if_unique_id_mismatch(reason="wrong_hub")
+                return self.async_update_reload_and_abort(
+                    entry,
+                    data={
+                        CONF_CONNECTION_MODE: CONNECTION_MODE_SHARED,
+                        CONF_TPLINK_ENTRY_ID: selected,
+                    },
+                )
+            return self.async_show_form(
+                step_id="reconfigure",
+                data_schema=self.add_suggested_values_to_schema(
+                    _shared_schema(hubs, include_direct=False),
+                    {CONF_TPLINK_ENTRY_ID: entry.data[CONF_TPLINK_ENTRY_ID]},
+                ),
+            )
+        return await self._async_reconfigure_direct(entry, user_input)
+
+    async def _async_reconfigure_direct(
+        self,
+        entry: ConfigEntry,
+        user_input: dict[str, Any] | None,
+    ) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
         if user_input is not None:
-            api, errors = await self._try_connect(user_input)
-            if api is not None:
+            try:
+                api = await _validate_direct(user_input)
+            except TapoIrAuthError:
+                errors["base"] = "invalid_auth"
+            except TapoIrError:
+                errors["base"] = "cannot_connect"
+            else:
                 await self.async_set_unique_id(api.hub_id)
                 self._abort_if_unique_id_mismatch(reason="wrong_hub")
-                return self.async_update_reload_and_abort(entry, data=user_input)
-
+                await api.async_close()
+                return self.async_update_reload_and_abort(
+                    entry,
+                    data={
+                        **user_input,
+                        CONF_CONNECTION_MODE: CONNECTION_MODE_DIRECT,
+                    },
+                )
         return self.async_show_form(
             step_id="reconfigure",
             data_schema=self.add_suggested_values_to_schema(
@@ -217,16 +329,16 @@ class TapoIrConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class TapoIrOptionsFlow(OptionsFlow):
-    """Scan interval + name overrides (input preserved across errors)."""
+    """Configure scan interval and explicit remote-name overrides."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
-
         if user_input is not None:
-            error = _validate_overrides(user_input.get(CONF_NAME_OVERRIDES, ""))
-            if error:
+            if error := _validate_overrides(
+                user_input.get(CONF_NAME_OVERRIDES, "")
+            ):
                 errors["base"] = error
             else:
                 return self.async_create_entry(
@@ -238,15 +350,16 @@ class TapoIrOptionsFlow(OptionsFlow):
                         ).strip(),
                     },
                 )
-
-        options = self.config_entry.options
-        suggested: dict[str, Any] = {
-            CONF_SCAN_INTERVAL: options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
-            CONF_NAME_OVERRIDES: options.get(CONF_NAME_OVERRIDES, ""),
+        suggested = {
+            CONF_SCAN_INTERVAL: self.config_entry.options.get(
+                CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
+            ),
+            CONF_NAME_OVERRIDES: self.config_entry.options.get(
+                CONF_NAME_OVERRIDES, ""
+            ),
         }
-        if user_input is not None:
+        if user_input:
             suggested.update(user_input)
-
         return self.async_show_form(
             step_id="init",
             data_schema=self.add_suggested_values_to_schema(
