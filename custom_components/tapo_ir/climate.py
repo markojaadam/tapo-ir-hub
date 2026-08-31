@@ -26,7 +26,7 @@ _HVAC_TO_TAPO = {
     HVACMode.HEAT: 1,
 }
 _TAPO_TO_HVAC = {value: key for key, value in _HVAC_TO_TAPO.items()}
-_FAN_TO_TAPO = {"auto": 0, "low": 1, "high": 3}
+_FAN_TO_TAPO = {"auto": 0, "low": 1, "medium": 2, "high": 3}
 _TAPO_TO_FAN = {value: key for key, value in _FAN_TO_TAPO.items()}
 _SWING_TO_TAPO = {"auto": 0, "fixed": 1}
 _TAPO_TO_SWING = {value: key for key, value in _SWING_TO_TAPO.items()}
