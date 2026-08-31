@@ -39,7 +39,6 @@ _FAN_TO_TAPO = {
     "low": 1,
     "medium": 2,
     "high": 3,
-    "max": 4,  # Experimental: not exposed by the Tapo app.
 }
 _TAPO_TO_FAN = {value: key for key, value in _FAN_TO_TAPO.items()}
 _SWING_TO_TAPO = {
