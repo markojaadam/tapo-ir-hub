@@ -44,6 +44,22 @@ class AcTests(unittest.TestCase):
             },
         )
 
+    def test_builds_payload_with_pressed_fid(self) -> None:
+        self.assertEqual(
+            ac.build_ac_payload(
+                {"P": 1, "M": 0, "T": 22, "S": 1, "D": 0},
+                pressed_fid=6,
+            ),
+            {
+                "power": 1,
+                "mode": 0,
+                "temp": 22,
+                "wind_speed": 1,
+                "wind_direct": 0,
+                "pressed_fid": 6,
+            },
+        )
+
     def test_builds_power_off_as_integer(self) -> None:
         self.assertEqual(
             ac.build_ac_payload({"P": 0, "M": 0, "T": 22, "S": 1, "D": 0})[
