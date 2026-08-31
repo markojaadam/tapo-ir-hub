@@ -34,7 +34,13 @@ _NON_TEMPERATURE_HVAC_MODES = {
     HVACMode.FAN_ONLY,
     HVACMode.DRY,
 }
-_FAN_TO_TAPO = {"auto": 0, "low": 1, "medium": 2, "high": 3}
+_FAN_TO_TAPO = {
+    "auto": 0,
+    "low": 1,
+    "medium": 2,
+    "high": 3,
+    "max": 4,  # Experimental: not exposed by the Tapo app.
+}
 _TAPO_TO_FAN = {value: key for key, value in _FAN_TO_TAPO.items()}
 _SWING_TO_TAPO = {
     "swing": (0, 6),
@@ -43,6 +49,7 @@ _SWING_TO_TAPO = {
     "position_3": (3, 7),
     "position_4": (4, 7),
     "position_5": (5, 7),
+    "position_6": (6, 7),  # Experimental: not exposed by the Tapo app.
 }
 _TAPO_TO_SWING = {
     wind_direct: swing_mode
@@ -190,7 +197,9 @@ class TapoIrAcClimate(
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         if hvac_mode is HVACMode.OFF:
             await self.coordinator.async_control_ac(
-                self._device_id, power=False
+                self._device_id,
+                power=False,
+                pressed_fid=1,
             )
             return
         if hvac_mode not in _HVAC_TO_TAPO:
@@ -218,10 +227,18 @@ class TapoIrAcClimate(
         )
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        await self.coordinator.async_control_ac(self._device_id, power=True)
+        await self.coordinator.async_control_ac(
+            self._device_id,
+            power=True,
+            pressed_fid=1,
+        )
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        await self.coordinator.async_control_ac(self._device_id, power=False)
+        await self.coordinator.async_control_ac(
+            self._device_id,
+            power=False,
+            pressed_fid=1,
+        )
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
         temperature = kwargs.get(ATTR_TEMPERATURE)
@@ -237,14 +254,18 @@ class TapoIrAcClimate(
             self.async_write_ha_state()
             return
         await self.coordinator.async_control_ac(
-            self._device_id, temp=rounded
+            self._device_id,
+            temp=rounded,
+            pressed_fid=3,
         )
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
         if fan_mode not in _FAN_TO_TAPO:
             raise HomeAssistantError(f"Unsupported fan mode: {fan_mode}")
         await self.coordinator.async_control_ac(
-            self._device_id, wind_speed=_FAN_TO_TAPO[fan_mode]
+            self._device_id,
+            wind_speed=_FAN_TO_TAPO[fan_mode],
+            pressed_fid=5,
         )
 
     async def async_set_swing_mode(self, swing_mode: str) -> None:
