@@ -13,6 +13,10 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import HUB_MODEL, MANUFACTURER, REMOTE_MODEL
 from .coordinator import TapoIrCoordinator
+from .mitsubishi_scratch import (
+    MITSUBISHI_MAX_TEMPLATE_LABEL,
+    async_send_mitsubishi_real_max,
+)
 
 PARALLEL_UPDATES = 1
 
@@ -138,6 +142,14 @@ class TapoIrKeyButton(CoordinatorEntity[TapoIrCoordinator], ButtonEntity):
         self.async_write_ha_state()
 
     async def async_press(self) -> None:
+        key = self._current_key() or {}
+        if key.get("label") == MITSUBISHI_MAX_TEMPLATE_LABEL:
+            await async_send_mitsubishi_real_max(
+                self.coordinator,
+                self._device_id,
+                self._key_name,
+            )
+            return
         await self.coordinator.async_fire(self._device_id, self._key_name)
 
 
