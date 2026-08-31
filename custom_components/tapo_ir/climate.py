@@ -36,8 +36,18 @@ _NON_TEMPERATURE_HVAC_MODES = {
 }
 _FAN_TO_TAPO = {"auto": 0, "low": 1, "medium": 2, "high": 3}
 _TAPO_TO_FAN = {value: key for key, value in _FAN_TO_TAPO.items()}
-_SWING_TO_TAPO = {"auto": 0, "fixed": 1}
-_TAPO_TO_SWING = {value: key for key, value in _SWING_TO_TAPO.items()}
+_SWING_TO_TAPO = {
+    "swing": (0, 6),
+    "auto": (1, 7),
+    "position_2": (2, 7),
+    "position_3": (3, 7),
+    "position_4": (4, 7),
+    "position_5": (5, 7),
+}
+_TAPO_TO_SWING = {
+    wind_direct: swing_mode
+    for swing_mode, (wind_direct, _pressed_fid) in _SWING_TO_TAPO.items()
+}
 
 
 async def async_setup_entry(
@@ -240,6 +250,9 @@ class TapoIrAcClimate(
     async def async_set_swing_mode(self, swing_mode: str) -> None:
         if swing_mode not in _SWING_TO_TAPO:
             raise HomeAssistantError(f"Unsupported swing mode: {swing_mode}")
+        wind_direct, pressed_fid = _SWING_TO_TAPO[swing_mode]
         await self.coordinator.async_control_ac(
-            self._device_id, wind_direct=_SWING_TO_TAPO[swing_mode]
+            self._device_id,
+            wind_direct=wind_direct,
+            pressed_fid=pressed_fid,
         )
