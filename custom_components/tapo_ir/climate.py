@@ -19,6 +19,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .button import child_device_info
 from .coordinator import TapoIrCoordinator
 
+PARALLEL_UPDATES = 1
+
 _HVAC_TO_TAPO = {
     HVACMode.COOL: 0,
     HVACMode.HEAT: 1,

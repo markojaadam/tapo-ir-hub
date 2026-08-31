@@ -120,8 +120,8 @@ class TapoIrSharedApi:
         self._coordinator, self._hub = _runtime_hub(self._entry())
         return self._coordinator, self._hub
 
-    async def async_connect(self) -> None:
-        """Resolve the shared runtime and capture hub identity."""
+    async def _async_refresh_parent(self) -> tuple[Any, Any]:
+        """Refresh the owning coordinator and reject stale cached data."""
         coordinator, hub = self._resolve()
         try:
             await coordinator.async_request_refresh()
@@ -129,6 +129,15 @@ class TapoIrSharedApi:
             raise TapoIrConnectionError(
                 f"Unable to refresh the shared TP-Link hub: {err}"
             ) from err
+        if not coordinator.last_update_success:
+            raise TapoIrConnectionError(
+                f"Core TP-Link hub {self._entry().title!r} is unavailable"
+            )
+        return coordinator, hub
+
+    async def async_connect(self) -> None:
+        """Resolve the shared runtime and capture hub identity."""
+        _, hub = await self._async_refresh_parent()
         info = getattr(hub, "_info", None) or {}
         self.hub_id = str(
             info.get("device_id")
@@ -151,13 +160,7 @@ class TapoIrSharedApi:
 
     async def async_get_raw_devices(self) -> list[dict[str, Any]]:
         """Refresh the shared coordinator and return raw IR child records."""
-        coordinator, hub = self._resolve()
-        try:
-            await coordinator.async_request_refresh()
-        except Exception as err:
-            raise TapoIrConnectionError(
-                f"Unable to refresh the shared TP-Link hub: {err}"
-            ) from err
+        _, hub = await self._async_refresh_parent()
         return [
             deepcopy(getattr(child, "_info", None) or {})
             for child in _ir_children(hub)

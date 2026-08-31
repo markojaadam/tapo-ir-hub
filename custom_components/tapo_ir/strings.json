@@ -84,5 +84,11 @@
         "name": "Air conditioner"
       }
     }
+  },
+  "issues": {
+    "shared_parent_unavailable": {
+      "title": "TP-Link hub unavailable",
+      "description": "Tapo IR Hub cannot refresh {hub} because its owning TP-Link integration entry is unavailable. Check the hub's power and network connection, then reload the TP-Link entry. Tapo IR entities will recover automatically when the parent hub becomes available."
+    }
   }
 }

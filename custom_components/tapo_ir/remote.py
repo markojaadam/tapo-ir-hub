@@ -14,6 +14,8 @@ from .button import child_device_info
 from .coordinator import TapoIrCoordinator
 from .naming import slugify
 
+PARALLEL_UPDATES = 1
+
 
 async def async_setup_entry(
     hass: HomeAssistant,

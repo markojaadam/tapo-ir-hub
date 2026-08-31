@@ -1,0 +1,88 @@
+rules:
+  # Bronze
+  config-flow: done
+  test-before-configure: done
+  unique-config-entry: done
+  config-flow-test-coverage:
+    status: todo
+    comment: Add Home Assistant config-flow harness coverage for every path.
+  runtime-data: done
+  test-before-setup: done
+  appropriate-polling: done
+  entity-unique-id: done
+  has-entity-name: done
+  docs-triggers:
+    status: exempt
+    comment: The integration does not provide triggers.
+  entity-event-setup: done
+  dependency-transparency: done
+  action-setup: done
+  common-modules:
+    status: todo
+    comment: Move shared entity behavior into entity.py.
+  docs-conditions:
+    status: exempt
+    comment: The integration does not provide conditions.
+  docs-high-level-description: done
+  docs-installation-instructions: done
+  docs-removal-instructions:
+    status: todo
+    comment: Add an explicit removal and rollback section.
+  docs-actions: done
+  brands:
+    status: todo
+    comment: Submit integration assets to home-assistant/brands.
+
+  # Silver
+  config-entry-unloading: done
+  log-when-unavailable: done
+  entity-unavailable: done
+  action-exceptions: done
+  reauthentication-flow: done
+  parallel-updates: done
+  test-coverage:
+    status: todo
+    comment: Raise integration-wide coverage above 95 percent.
+  integration-owner: done
+  docs-installation-parameters: done
+  docs-configuration-parameters: done
+
+  # Gold
+  entity-translations: done
+  entity-device-class: done
+  devices: done
+  entity-category: done
+  entity-disabled-by-default: done
+  discovery:
+    status: exempt
+    comment: Shared mode discovers loaded TP-Link entries; direct discovery is unsupported.
+  stale-devices: done
+  diagnostics: done
+  exception-translations:
+    status: todo
+    comment: Convert runtime exception messages to translated exceptions.
+  icon-translations:
+    status: todo
+    comment: Move static entity icons to icons.json.
+  reconfiguration-flow: done
+  dynamic-devices: done
+  discovery-update-info:
+    status: exempt
+    comment: Shared mode inherits host updates from the owning TP-Link entry.
+  repair-issues: done
+  docs-use-cases: done
+  docs-supported-devices: done
+  docs-supported-functions: done
+  docs-data-update: done
+  docs-known-limitations: done
+  docs-troubleshooting: done
+  docs-examples: done
+
+  # Platinum
+  async-dependency: done
+  inject-websession:
+    status: todo
+    comment: Direct mode must inject a Home Assistant-managed aiohttp session.
+  strict-typing:
+    status: todo
+    comment: Add strict type checking and a typed ConfigEntry alias.

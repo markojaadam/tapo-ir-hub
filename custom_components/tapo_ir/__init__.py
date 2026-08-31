@@ -9,6 +9,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.device_registry import DeviceEntry
 from homeassistant.helpers.typing import ConfigType
 
 from .api import TapoIrApi, TapoIrAuthError, TapoIrError
@@ -25,6 +27,7 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     PLATFORMS,
+    REPAIR_SHARED_PARENT_UNAVAILABLE,
 )
 from .coordinator import TapoIrCoordinator
 from .frontend import async_register_frontend
@@ -86,6 +89,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except TapoIrAuthError as err:
         raise ConfigEntryAuthFailed(str(err)) from err
     except TapoIrError as err:
+        if entry.data.get(CONF_CONNECTION_MODE) == CONNECTION_MODE_SHARED:
+            ir.async_create_issue(
+                hass,
+                DOMAIN,
+                f"{REPAIR_SHARED_PARENT_UNAVAILABLE}_{entry.entry_id}",
+                is_fixable=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key=REPAIR_SHARED_PARENT_UNAVAILABLE,
+                translation_placeholders={"hub": entry.title},
+            )
         raise ConfigEntryNotReady(str(err)) from err
 
     coordinator = TapoIrCoordinator(
@@ -95,6 +108,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
     )
     await coordinator.async_config_entry_first_refresh()
+    ir.async_delete_issue(
+        hass,
+        DOMAIN,
+        f"{REPAIR_SHARED_PARENT_UNAVAILABLE}_{entry.entry_id}",
+    )
     entry.runtime_data = coordinator
 
     _async_migrate_key_unique_ids(hass, entry, coordinator)
@@ -156,6 +174,38 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         coordinator: TapoIrCoordinator = entry.runtime_data
         await coordinator.async_shutdown()
     return unloaded
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    device_entry: DeviceEntry,
+) -> bool:
+    """Allow removal only after a hub or remote is no longer reported."""
+    coordinator = getattr(entry, "runtime_data", None)
+    if not isinstance(coordinator, TapoIrCoordinator):
+        return False
+    active_ids = {coordinator.hub_id, *(coordinator.data or {})}
+    integration_ids = {
+        identifier
+        for identifier in device_entry.identifiers
+        if identifier[0] in {DOMAIN, coordinator.identifier_domain}
+    }
+    return bool(integration_ids) and all(
+        identifier[1] not in active_ids for identifier in integration_ids
+    )
+
+
+async def async_remove_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+) -> None:
+    """Remove config-entry-scoped repair issues."""
+    ir.async_delete_issue(
+        hass,
+        DOMAIN,
+        f"{REPAIR_SHARED_PARENT_UNAVAILABLE}_{entry.entry_id}",
+    )
 
 
 async def _async_update_listener(

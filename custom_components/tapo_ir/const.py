@@ -6,7 +6,7 @@ from typing import Final
 from homeassistant.const import Platform
 
 DOMAIN: Final = "tapo_ir"
-INTEGRATION_VERSION: Final = "2.0.0"
+INTEGRATION_VERSION: Final = "2.0.1"
 
 PLATFORMS: list[Platform] = [
     Platform.BUTTON,
@@ -51,3 +51,5 @@ WS_DELETE_KEY: Final = "tapo_ir/key/delete"
 WS_DELETE_REMOTE: Final = "tapo_ir/remote/delete"
 WS_LEARN: Final = "tapo_ir/learn"
 WS_STOP_LEARN: Final = "tapo_ir/learn/stop"
+
+REPAIR_SHARED_PARENT_UNAVAILABLE: Final = "shared_parent_unavailable"

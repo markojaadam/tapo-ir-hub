@@ -14,6 +14,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import HUB_MODEL, MANUFACTURER, REMOTE_MODEL
 from .coordinator import TapoIrCoordinator
 
+PARALLEL_UPDATES = 1
+
 
 def hub_device_info(coordinator: TapoIrCoordinator) -> DeviceInfo:
     """Return the registry identity for the physical hub."""

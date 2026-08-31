@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.0.1 - 2026-08-30
+
+### Fixed
+
+- Shared-session entries now reject stale cached child data whenever the owning
+  TP-Link coordinator is unavailable.
+- Tapo IR entities now become unavailable with their parent hub instead of
+  presenting old remote data as healthy.
+
+### Added
+
+- Added privacy-safe config-entry diagnostics with parent coordinator health,
+  remote inventory, label-source counts, and no credentials or IR waveforms.
+- Added a translated Repair issue for an unavailable shared TP-Link parent,
+  automatically cleared when the hub recovers.
+- Added safe removal support for hub and remote devices no longer reported by
+  the integration.
+- Declared explicit platform request parallelism.
+
 ## 2.0.0 - 2026-08-30
 
 ### Fixed

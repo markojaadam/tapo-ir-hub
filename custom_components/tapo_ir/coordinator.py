@@ -8,11 +8,12 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
 from .api import TapoIrApi, TapoIrAuthError, TapoIrError
-from .const import DOMAIN
+from .const import DOMAIN, REPAIR_SHARED_PARENT_UNAVAILABLE
 from .manager import IRTransactionManager
 
 _LOGGER = logging.getLogger(__name__)
@@ -61,9 +62,33 @@ class TapoIrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         except TapoIrAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except TapoIrError as err:
+            self._async_report_parent_unavailable()
             raise UpdateFailed(str(err)) from err
+        self._async_clear_parent_unavailable()
         self.last_scan = dt_util.utcnow()
         return {device["device_id"]: device for device in devices}
+
+    @property
+    def _repair_issue_id(self) -> str:
+        return f"{REPAIR_SHARED_PARENT_UNAVAILABLE}_{self.config_entry.entry_id}"
+
+    def _async_report_parent_unavailable(self) -> None:
+        """Create one actionable issue for a failed shared parent."""
+        if self.identifier_domain != "tplink":
+            return
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            self._repair_issue_id,
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=REPAIR_SHARED_PARENT_UNAVAILABLE,
+            translation_placeholders={"hub": self.hub_name},
+        )
+
+    def _async_clear_parent_unavailable(self) -> None:
+        """Clear the repair as soon as the parent hub recovers."""
+        ir.async_delete_issue(self.hass, DOMAIN, self._repair_issue_id)
 
     async def async_fire(self, device_id: str, key_name: str) -> None:
         """Fire one stored key."""

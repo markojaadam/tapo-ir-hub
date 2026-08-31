@@ -15,6 +15,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .button import hub_device_info
 from .coordinator import TapoIrCoordinator
 
+PARALLEL_UPDATES = 0
+
 
 async def async_setup_entry(
     hass: HomeAssistant,

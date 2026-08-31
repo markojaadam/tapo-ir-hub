@@ -184,6 +184,8 @@ retried automatically.
 ## Reliability and safety
 
 - Hub mutations are serialized per configured hub.
+- Shared IR availability follows the owning TP-Link coordinator; cached remote
+  data is never presented as healthy after a failed parent refresh.
 - Writes are refreshed and compared with their read-back result.
 - Remote creation is transactional and rolls back incomplete work.
 - Nested protocol failures are surfaced instead of reported as success.
@@ -192,6 +194,11 @@ retried automatically.
   strings.
 - The management card has no IR transmission API.
 - No telemetry is collected.
+
+Config-entry diagnostics contain parent health and remote inventory while
+redacting credentials, network addresses, device identifiers, and IR
+waveforms. An unavailable shared parent also creates a Home Assistant Repair
+issue that clears automatically after recovery.
 
 ## Troubleshooting
 
