@@ -6,7 +6,7 @@ from typing import Final
 from homeassistant.const import Platform
 
 DOMAIN: Final = "tapo_ir"
-INTEGRATION_VERSION: Final = "2.0.2"
+INTEGRATION_VERSION: Final = "2.0.3"
 
 PLATFORMS: list[Platform] = [
     Platform.BUTTON,
@@ -21,6 +21,7 @@ CONF_USERNAME: Final = "username"
 CONF_PASSWORD: Final = "password"
 CONF_CONNECTION_MODE: Final = "connection_mode"
 CONF_TPLINK_ENTRY_ID: Final = "tplink_entry_id"
+CONF_LEGACY_ENTITY_IDS: Final = "legacy_entity_ids"
 
 CONNECTION_MODE_DIRECT: Final = "direct"
 CONNECTION_MODE_SHARED: Final = "shared"

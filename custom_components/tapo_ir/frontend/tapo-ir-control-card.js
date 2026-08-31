@@ -1,4 +1,4 @@
-const CARD_VERSION = "2.0.2";
+const CARD_VERSION = "2.0.3";
 const NEW_REMOTE = "__new_remote__";
 const NEW_BUTTON = "__new_button__";
 

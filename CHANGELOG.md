@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.0.3 - 2026-08-30
+
+### Fixed
+
+- Added an explicit migration bridge for button entities created by the retired
+  `tplink_ir` sidecar.
+- Sidecar entity IDs are captured by remote identity and key identity/label,
+  then transferred to Tapo IR when the old platform is unloaded.
+- If the sidecar is still loaded, the mapping is retained in the config entry
+  and applied on the next reload after sidecar removal.
+- Existing dashboard, script, and automation references therefore retain their
+  entity IDs instead of receiving unexpected numeric suffixes.
+
 ## 2.0.2 - 2026-08-30
 
 ### Fixed

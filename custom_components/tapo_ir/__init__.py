@@ -18,12 +18,14 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.device_registry import DeviceEntry
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity import entity_sources
 from homeassistant.helpers.typing import ConfigType
 
 from .api import TapoIrApi, TapoIrAuthError, TapoIrError
 from .const import (
     CONF_CONNECTION_MODE,
     CONF_HOST,
+    CONF_LEGACY_ENTITY_IDS,
     CONF_NAME_OVERRIDES,
     CONF_PASSWORD,
     CONF_SCAN_INTERVAL,
@@ -38,6 +40,7 @@ from .const import (
 )
 from .coordinator import TapoIrCoordinator
 from .frontend import async_register_frontend
+from .migration import find_sidecar_entity
 from .shared_api import TapoIrSharedApi
 from .websocket import async_register_websocket_api
 
@@ -161,10 +164,147 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     entry.runtime_data = coordinator
 
+    _async_migrate_sidecar_entities(hass, entry, coordinator)
     _async_migrate_key_unique_ids(hass, entry, coordinator)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     return True
+
+
+def _async_migrate_sidecar_entities(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    coordinator: TapoIrCoordinator,
+) -> None:
+    """Preserve sidecar entity IDs across the domain migration."""
+    registry = er.async_get(hass)
+    sidecar_entities = [
+        entity
+        for entity in registry.entities.values()
+        if entity.platform == "tplink_ir"
+        and entity.domain == "button"
+    ]
+    legacy_ids = dict(entry.data.get(CONF_LEGACY_ENTITY_IDS, {}))
+
+    for device in (coordinator.data or {}).values():
+        for key in device["keys"]:
+            key_identity = key.get("id")
+            if key_identity in (None, -1):
+                key_identity = key["name"]
+            new_unique_id = f"{device['device_id']}_key_{key_identity}"
+
+            if new_unique_id not in legacy_ids:
+                if sidecar := find_sidecar_entity(
+                    device["device_id"],
+                    key,
+                    sidecar_entities,
+                ):
+                    legacy_ids[new_unique_id] = sidecar.entity_id
+
+    if legacy_ids != entry.data.get(CONF_LEGACY_ENTITY_IDS, {}):
+        hass.config_entries.async_update_entry(
+            entry,
+            data={
+                **entry.data,
+                CONF_LEGACY_ENTITY_IDS: legacy_ids,
+            },
+        )
+
+    for new_unique_id, legacy_entity_id in legacy_ids.items():
+        legacy = registry.async_get(legacy_entity_id)
+        current_entity_id = registry.async_get_entity_id(
+            "button",
+            DOMAIN,
+            new_unique_id,
+        )
+        if legacy is not None and legacy.platform == "tplink_ir":
+            if legacy_entity_id in entity_sources(hass):
+                _LOGGER.info(
+                    "Deferring migration of loaded sidecar entity %s",
+                    legacy_entity_id,
+                )
+                continue
+            if (
+                current_entity_id is not None
+                and current_entity_id != legacy_entity_id
+            ):
+                if current_entity_id in entity_sources(hass):
+                    _LOGGER.info(
+                        "Deferring migration while Tapo IR entity %s is loaded",
+                        current_entity_id,
+                    )
+                    continue
+                current = registry.async_get(current_entity_id)
+                assert current is not None
+                merged_aliases = list(legacy.aliases)
+                merged_aliases.extend(
+                    alias
+                    for alias in current.aliases
+                    if alias not in merged_aliases
+                )
+                registry.async_update_entity(
+                    legacy_entity_id,
+                    aliases=merged_aliases,
+                    area_id=current.area_id or legacy.area_id,
+                    categories={
+                        **legacy.categories,
+                        **current.categories,
+                    },
+                    disabled_by=(
+                        current.disabled_by
+                        if current.disabled_by is not None
+                        else legacy.disabled_by
+                    ),
+                    entity_category=(
+                        current.entity_category
+                        if current.entity_category is not None
+                        else legacy.entity_category
+                    ),
+                    hidden_by=(
+                        current.hidden_by
+                        if current.hidden_by is not None
+                        else legacy.hidden_by
+                    ),
+                    icon=current.icon or legacy.icon,
+                    labels=set(legacy.labels) | set(current.labels),
+                    name=current.name or legacy.name,
+                )
+                registry.async_remove(current_entity_id)
+                registry.async_update_entity_platform(
+                    legacy_entity_id,
+                    DOMAIN,
+                    new_config_entry_id=entry.entry_id,
+                    new_unique_id=new_unique_id,
+                )
+                continue
+            try:
+                registry.async_update_entity_platform(
+                    legacy_entity_id,
+                    DOMAIN,
+                    new_config_entry_id=entry.entry_id,
+                    new_unique_id=new_unique_id,
+                )
+            except ValueError:
+                _LOGGER.info(
+                    "Deferring migration of loaded sidecar entity %s",
+                    legacy_entity_id,
+                )
+            continue
+        if (
+            legacy is None
+            and current_entity_id is not None
+            and current_entity_id != legacy_entity_id
+        ):
+            try:
+                registry.async_update_entity(
+                    current_entity_id,
+                    new_entity_id=legacy_entity_id,
+                )
+            except ValueError:
+                _LOGGER.warning(
+                    "Cannot restore legacy entity ID %s because it is in use",
+                    legacy_entity_id,
+                )
 
 
 def _async_migrate_key_unique_ids(
