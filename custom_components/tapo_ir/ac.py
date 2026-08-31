@@ -35,7 +35,9 @@ def parse_ac_status(child: dict[str, Any]) -> dict[str, int]:
     return state
 
 
-def build_ac_payload(state: dict[str, int]) -> dict[str, int]:
+def build_ac_payload(
+    state: dict[str, int], *, pressed_fid: int | None = None
+) -> dict[str, int]:
     """Build the native H110 sendIrCmdByStatus state payload."""
     missing = sorted(REQUIRED_AC_FIELDS - state.keys())
     if missing:
@@ -43,10 +45,13 @@ def build_ac_payload(state: dict[str, int]) -> dict[str, int]:
             "The hub has not reported a complete AC state; missing "
             + ", ".join(missing)
         )
-    return {
+    payload = {
         "power": int(bool(state["P"])),
         "mode": state["M"],
         "temp": state["T"],
         "wind_speed": state["S"],
         "wind_direct": state["D"],
     }
+    if pressed_fid is not None:
+        payload["pressed_fid"] = int(pressed_fid)
+    return payload
