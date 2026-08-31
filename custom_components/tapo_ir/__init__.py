@@ -5,12 +5,19 @@ import json
 import logging
 from typing import Any
 
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.config_entries import (
+    SIGNAL_CONFIG_ENTRY_CHANGED,
+    ConfigEntry,
+    ConfigEntryChange,
+    ConfigEntryState,
+)
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.device_registry import DeviceEntry
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.typing import ConfigType
 
 from .api import TapoIrApi, TapoIrAuthError, TapoIrError
@@ -57,6 +64,45 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Register the bundled utility card and admin websocket API."""
     await async_register_frontend(hass)
     async_register_websocket_api(hass)
+
+    @callback
+    def _async_parent_entry_changed(
+        change: ConfigEntryChange,
+        parent_entry: ConfigEntry,
+    ) -> None:
+        """Promptly resume dependent entries when a TP-Link hub recovers."""
+        if (
+            change is not ConfigEntryChange.UPDATED
+            or parent_entry.domain != "tplink"
+            or parent_entry.state is not ConfigEntryState.LOADED
+        ):
+            return
+        for child_entry in hass.config_entries.async_entries(DOMAIN):
+            if (
+                child_entry.data.get(CONF_CONNECTION_MODE)
+                == CONNECTION_MODE_SHARED
+                and child_entry.data.get(CONF_TPLINK_ENTRY_ID)
+                == parent_entry.entry_id
+                and child_entry.state.recoverable
+                and child_entry.state
+                not in {
+                    ConfigEntryState.LOADED,
+                    ConfigEntryState.SETUP_IN_PROGRESS,
+                }
+            ):
+                hass.config_entries.async_schedule_reload(
+                    child_entry.entry_id
+                )
+
+    unsubscribe = async_dispatcher_connect(
+        hass,
+        SIGNAL_CONFIG_ENTRY_CHANGED,
+        _async_parent_entry_changed,
+    )
+    hass.bus.async_listen_once(
+        EVENT_HOMEASSISTANT_STOP,
+        lambda _event: unsubscribe(),
+    )
     return True
 
 

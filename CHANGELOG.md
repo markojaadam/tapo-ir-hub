@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.0.2 - 2026-08-30
+
+### Fixed
+
+- Shared Tapo IR entries now resume immediately when their owning core TP-Link
+  entry transitions back to loaded after a device power-cycle or network
+  recovery.
+- Recovery no longer waits for an independent Tapo IR setup-retry backoff after
+  the parent hub is already healthy.
+
 ## 2.0.1 - 2026-08-30
 
 ### Fixed

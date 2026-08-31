@@ -6,7 +6,7 @@ from typing import Final
 from homeassistant.const import Platform
 
 DOMAIN: Final = "tapo_ir"
-INTEGRATION_VERSION: Final = "2.0.1"
+INTEGRATION_VERSION: Final = "2.0.2"
 
 PLATFORMS: list[Platform] = [
     Platform.BUTTON,
