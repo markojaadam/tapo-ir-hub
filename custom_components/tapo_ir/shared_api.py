@@ -8,7 +8,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant
 
-from .ac import AcStateError, build_ac_payload
+from .ac import AcStateError, build_ac_payload, build_ac_profile_payload
 from .api import (
     TapoIrConnectionError,
     parse_child_devices,
@@ -251,15 +251,36 @@ class TapoIrSharedApi:
         device_id: str,
         *,
         current_state: dict[str, int],
+        pressed_fid: int | None = None,
     ) -> dict[str, Any]:
         """Send one complete AC state through the shared session."""
         try:
-            payload = build_ac_payload(current_state)
+            payload = build_ac_payload(current_state, pressed_fid=pressed_fid)
         except AcStateError as err:
             raise TapoIrConnectionError(str(err)) from err
         return await self.async_query_child(
             device_id, "sendIrCmdByStatus", payload, batched=True
         )
+
+    async def async_control_ac_profile(
+        self,
+        *,
+        current_state: dict[str, int],
+        hex_data: str,
+        frequency: int,
+        pressed_fid: int | None = None,
+    ) -> dict[str, Any]:
+        """Send one complete AC state through an explicit transient profile."""
+        try:
+            payload = build_ac_profile_payload(
+                current_state,
+                hex_data=hex_data,
+                frequency=frequency,
+                pressed_fid=pressed_fid,
+            )
+        except AcStateError as err:
+            raise TapoIrConnectionError(str(err)) from err
+        return await self.async_query_hub("sendIrCmdAc", payload)
 
     async def async_close(self) -> None:
         """Leave the core integration-owned session open."""
