@@ -4,6 +4,10 @@ from __future__ import annotations
 from typing import Any
 
 REQUIRED_AC_FIELDS = frozenset({"P", "M", "T", "S", "D"})
+DEFAULT_IR_FREQUENCY = 38_000
+
+_MITSUBISHI_FAN_TABLE_HIGH = "040B10034D5000034D5001034D5002034D5003"
+_MITSUBISHI_FAN_TABLE_REAL_MAX = "040B10034D5000034D5001034D5002034D5004"
 
 
 class AcStateError(ValueError):
@@ -54,4 +58,44 @@ def build_ac_payload(
     }
     if pressed_fid is not None:
         payload["pressed_fid"] = int(pressed_fid)
+    return payload
+
+
+def supports_mitsubishi_real_max(hex_data: Any) -> bool:
+    """Return whether an AC profile has the verified Mitsubishi HIGH mapping."""
+    return (
+        isinstance(hex_data, str)
+        and hex_data.upper().count(_MITSUBISHI_FAN_TABLE_HIGH) == 1
+    )
+
+
+def remap_mitsubishi_high_to_real_max(hex_data: str) -> str:
+    """Remap Tapo HIGH (S3) to Mitsubishi's hidden native fan value 4."""
+    normalized = hex_data.upper()
+    count = normalized.count(_MITSUBISHI_FAN_TABLE_HIGH)
+    if count != 1:
+        raise AcStateError(
+            "Expected exactly one verified Mitsubishi HIGH fan mapping; "
+            f"found {count}"
+        )
+    return normalized.replace(
+        _MITSUBISHI_FAN_TABLE_HIGH,
+        _MITSUBISHI_FAN_TABLE_REAL_MAX,
+        1,
+    )
+
+
+def build_ac_profile_payload(
+    state: dict[str, int],
+    *,
+    hex_data: str,
+    frequency: int = DEFAULT_IR_FREQUENCY,
+    pressed_fid: int | None = None,
+) -> dict[str, Any]:
+    """Build a top-level sendIrCmdAc payload using an explicit AC profile."""
+    payload: dict[str, Any] = {
+        "frequency": int(frequency),
+        "hexData": hex_data,
+    }
+    payload.update(build_ac_payload(state, pressed_fid=pressed_fid))
     return payload

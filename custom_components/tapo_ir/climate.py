@@ -16,6 +16,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .ac import supports_mitsubishi_real_max
 from .button import child_device_info
 from .coordinator import TapoIrCoordinator
 
@@ -41,6 +42,7 @@ _FAN_TO_TAPO = {
     "high": 3,
 }
 _TAPO_TO_FAN = {value: key for key, value in _FAN_TO_TAPO.items()}
+_MITSUBISHI_MAX_FAN = "max"
 _SWING_TO_TAPO = {
     "swing": (0, 6),
     "auto": (1, 7),
@@ -124,6 +126,11 @@ class TapoIrAcClimate(
         self._attr_unique_id = f"{self._device_id}_climate"
         self._attr_device_info = child_device_info(coordinator, device)
         self._last_temperature: float | None = None
+        self._supports_mitsubishi_max = supports_mitsubishi_real_max(
+            device.get("hex_data")
+        )
+        if self._supports_mitsubishi_max:
+            self._attr_fan_modes = [*_FAN_TO_TAPO, _MITSUBISHI_MAX_FAN]
         self._remember_temperature()
 
     @property
@@ -179,6 +186,11 @@ class TapoIrAcClimate(
 
     @property
     def fan_mode(self) -> str | None:
+        if (
+            self.coordinator.is_mitsubishi_max_active(self._device_id)
+            and self._state.get("S") == _FAN_TO_TAPO["high"]
+        ):
+            return _MITSUBISHI_MAX_FAN
         return _TAPO_TO_FAN.get(self._state.get("S"))
 
     @property
@@ -188,15 +200,34 @@ class TapoIrAcClimate(
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Clarify that state is last-command state, not device feedback."""
-        return {
+        attributes: dict[str, Any] = {
             "state_source": "last_known_ir_profile",
             "raw_tapo_state": dict(self._state),
         }
+        if self._supports_mitsubishi_max:
+            attributes["mitsubishi_max_fan_active"] = (
+                self.coordinator.is_mitsubishi_max_active(self._device_id)
+            )
+        return attributes
+
+    async def _async_control_ac(
+        self,
+        *,
+        pressed_fid: int | None = None,
+        use_mitsubishi_max: bool | None = None,
+        **changes: Any,
+    ) -> None:
+        """Preserve the transient MAX profile mapping across state changes."""
+        await self.coordinator.async_control_ac(
+            self._device_id,
+            pressed_fid=pressed_fid,
+            use_mitsubishi_max=use_mitsubishi_max,
+            **changes,
+        )
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         if hvac_mode is HVACMode.OFF:
-            await self.coordinator.async_control_ac(
-                self._device_id,
+            await self._async_control_ac(
                 power=False,
                 pressed_fid=1,
             )
@@ -219,22 +250,19 @@ class TapoIrAcClimate(
                 )
             changes["temp"] = round(self._last_temperature)
 
-        await self.coordinator.async_control_ac(
-            self._device_id,
+        await self._async_control_ac(
             pressed_fid=2,
             **changes,
         )
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        await self.coordinator.async_control_ac(
-            self._device_id,
+        await self._async_control_ac(
             power=True,
             pressed_fid=1,
         )
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        await self.coordinator.async_control_ac(
-            self._device_id,
+        await self._async_control_ac(
             power=False,
             pressed_fid=1,
         )
@@ -252,27 +280,37 @@ class TapoIrAcClimate(
         if self.hvac_mode in _NON_TEMPERATURE_HVAC_MODES:
             self.async_write_ha_state()
             return
-        await self.coordinator.async_control_ac(
-            self._device_id,
+        await self._async_control_ac(
             temp=rounded,
             pressed_fid=3,
         )
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
+        if fan_mode == _MITSUBISHI_MAX_FAN:
+            if not self._supports_mitsubishi_max:
+                raise HomeAssistantError("MAX fan is not supported by this AC profile")
+            await self._async_control_ac(
+                wind_speed=_FAN_TO_TAPO["high"],
+                pressed_fid=5,
+                use_mitsubishi_max=True,
+            )
+            self.async_write_ha_state()
+            return
+
         if fan_mode not in _FAN_TO_TAPO:
             raise HomeAssistantError(f"Unsupported fan mode: {fan_mode}")
-        await self.coordinator.async_control_ac(
-            self._device_id,
+        await self._async_control_ac(
             wind_speed=_FAN_TO_TAPO[fan_mode],
             pressed_fid=5,
+            use_mitsubishi_max=False,
         )
+        self.async_write_ha_state()
 
     async def async_set_swing_mode(self, swing_mode: str) -> None:
         if swing_mode not in _SWING_TO_TAPO:
             raise HomeAssistantError(f"Unsupported swing mode: {swing_mode}")
         wind_direct, pressed_fid = _SWING_TO_TAPO[swing_mode]
-        await self.coordinator.async_control_ac(
-            self._device_id,
+        await self._async_control_ac(
             wind_direct=wind_direct,
             pressed_fid=pressed_fid,
         )
