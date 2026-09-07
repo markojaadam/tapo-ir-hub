@@ -78,14 +78,16 @@ async def ws_list(
 ) -> None:
     """Return all loaded hubs, remotes, and exact editable key codes."""
     hubs: list[dict[str, Any]] = []
-    try:
-        for entry in hass.config_entries.async_entries(DOMAIN):
+    errors: list[dict[str, str]] = []
+    for entry in hass.config_entries.async_entries(DOMAIN):
+        try:
             if (
                 entry.state is not ConfigEntryState.LOADED
                 or not isinstance(
                     getattr(entry, "runtime_data", None), TapoIrCoordinator
                 )
             ):
+                errors.append({"entry_id": entry.entry_id, "name": entry.title, "message": "Hub is not loaded"})
                 continue
             coordinator: TapoIrCoordinator = entry.runtime_data
             hubs.append(
@@ -99,10 +101,9 @@ async def ws_list(
                     "remotes": await coordinator.manager.async_configuration(),
                 }
             )
-    except (HomeAssistantError, TapoIrError) as err:
-        _send_error(connection, msg["id"], err)
-        return
-    connection.send_result(msg["id"], {"hubs": hubs})
+        except (HomeAssistantError, TapoIrError) as err:
+            errors.append({"entry_id": entry.entry_id, "name": entry.title, "message": str(err)})
+    connection.send_result(msg["id"], {"hubs": hubs, "errors": errors})
 
 
 _KEY_SCHEMA = vol.Schema(
@@ -309,17 +310,29 @@ async def ws_learn(
 
 
 @websocket_api.require_admin
-@websocket_api.websocket_command({vol.Required("type"): WS_STOP_LEARN})
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_STOP_LEARN,
+        vol.Optional("entry_id"): cv.string,
+        vol.Optional("remote_device_id"): cv.string,
+    }
+)
 @websocket_api.async_response
 async def ws_stop_learn(
     hass: HomeAssistant,
     connection: websocket_api.ActiveConnection,
     msg: dict[str, Any],
 ) -> None:
-    """Stop every active learning session owned by this integration."""
+    """Stop learning on the selected hub, or all hubs for legacy callers."""
     stopped = 0
     try:
-        for coordinator in _coordinators(hass):
+        if remote_id := msg.get("remote_device_id"):
+            coordinators = [_remote_coordinator(hass, remote_id)]
+        elif entry_id := msg.get("entry_id"):
+            coordinators = [_entry_coordinator(hass, entry_id)]
+        else:
+            coordinators = _coordinators(hass)
+        for coordinator in coordinators:
             stopped += int(await coordinator.manager.async_stop_learning())
     except (HomeAssistantError, TapoIrError) as err:
         _send_error(connection, msg["id"], err)

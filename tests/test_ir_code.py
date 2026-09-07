@@ -50,12 +50,20 @@ class IrCodeTests(unittest.TestCase):
             '{"pwm":true,"pulse":"1,2"}',
             '{"pwm":26,"pulse":""}',
             "not-json",
+            "null",
+            "[]",
+            '{"pwm":26,"pulse":"  "}',
         )
         for value in invalid:
             with self.subTest(value=value), self.assertRaises(
                 ir_code.IrCodeError
             ):
                 ir_code.parse_code_text(value)
+
+    def test_large_padding_and_numeric_tokens(self) -> None:
+        self.assertEqual(ir_code.trim_numeric_silence("0," * 10000 + "900,-450,0"), "900,-450")
+        huge = "9" * 5000
+        self.assertEqual(ir_code.trim_numeric_silence(f"0,{huge},0"), huge)
 
 
 if __name__ == "__main__":

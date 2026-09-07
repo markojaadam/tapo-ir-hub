@@ -1,6 +1,8 @@
 """Remote entities for each virtual IR profile."""
 from __future__ import annotations
 
+import asyncio
+import math
 from collections.abc import Iterable
 
 from homeassistant.components.remote import RemoteEntity
@@ -82,11 +84,16 @@ class TapoIrRemote(CoordinatorEntity[TapoIrCoordinator], RemoteEntity):
     def _resolve_key(self, command: str) -> str:
         wanted = command.strip().casefold()
         wanted_slug = slugify(command)
-        for key in (self._device or {}).get("keys", []):
-            if wanted in {key["name"].casefold(), key["label"].casefold()}:
-                return key["name"]
-            if wanted_slug in {slugify(key["name"]), key["slug"]}:
-                return key["name"]
+        keys = (self._device or {}).get("keys", [])
+        for matches in (
+            [key for key in keys if wanted == key["name"].casefold()],
+            [key for key in keys if wanted == key["label"].casefold()],
+            [key for key in keys if wanted_slug in {slugify(key["name"]), key["slug"]}],
+        ):
+            if wanted and len(matches) == 1:
+                return matches[0]["name"]
+            if wanted and len(matches) > 1:
+                raise HomeAssistantError(f"Ambiguous IR command {command!r}")
         raise HomeAssistantError(
             f"Unknown IR command {command!r} for {self.entity_id}"
         )
@@ -95,10 +102,20 @@ class TapoIrRemote(CoordinatorEntity[TapoIrCoordinator], RemoteEntity):
         self, command: Iterable[str], **kwargs: object
     ) -> None:
         repeats = int(kwargs.get("num_repeats", 1))
-        for requested in command:
-            key_name = self._resolve_key(requested)
-            for _repeat in range(max(1, repeats)):
+        delay = float(kwargs.get("delay_secs", 0.4))
+        if repeats < 1 or not math.isfinite(delay) or delay < 0:
+            raise HomeAssistantError("Repeats must be positive and delay non-negative")
+        if kwargs.get("hold_secs", 0):
+            raise HomeAssistantError("Holding IR commands is not supported")
+        commands = [command] if isinstance(command, str) else list(command)
+        resolved = [self._resolve_key(requested) for requested in commands]
+        first = True
+        for key_name in resolved:
+            for _repeat in range(repeats):
+                if not first:
+                    await asyncio.sleep(delay)
                 await self.coordinator.async_fire(self._device_id, key_name)
+                first = False
 
     async def async_turn_on(self, **kwargs: object) -> None:
         self._attr_is_on = True

@@ -19,7 +19,7 @@ def parse_code_text(code_text: str, *, fallback_pwm: Any = None) -> dict[str, An
         raise IrCodeError("IR code is too large")
     try:
         value = json.loads(code_text)
-    except json.JSONDecodeError as err:
+    except (ValueError, RecursionError) as err:
         raise IrCodeError(
             "IR code must be JSON with 'pwm' and 'pulse' fields"
         ) from err
@@ -30,7 +30,7 @@ def parse_code_text(code_text: str, *, fallback_pwm: Any = None) -> dict[str, An
     pulse = value.get("pulse")
     if isinstance(pwm, bool) or not isinstance(pwm, int) or pwm <= 0:
         raise IrCodeError("IR code 'pwm' must be a positive integer")
-    if not isinstance(pulse, str) or not pulse:
+    if not isinstance(pulse, str) or not pulse.strip():
         raise IrCodeError("IR code 'pulse' must be a non-empty string")
     if len(pulse) > CODE_MAX_LENGTH:
         raise IrCodeError("IR pulse data is too large")
@@ -54,10 +54,11 @@ def trim_numeric_silence(pulse: str) -> str:
         )
     separator = "," if "," in pulse else (";" if ";" in pulse else " ")
     values = [part for part in re.split(r"[\s,;]+", pulse.strip()) if part]
-    while values and int(values[0]) == 0:
-        values.pop(0)
-    while values and int(values[-1]) == 0:
-        values.pop()
-    if not values:
+    start, end = 0, len(values)
+    while start < end and not values[start].lstrip("-0"):
+        start += 1
+    while end > start and not values[end - 1].lstrip("-0"):
+        end -= 1
+    if start == end:
         raise IrCodeError("Trimming removed the entire pulse sequence")
-    return separator.join(values)
+    return separator.join(values[start:end])

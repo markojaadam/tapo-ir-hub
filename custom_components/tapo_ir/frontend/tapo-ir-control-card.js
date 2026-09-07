@@ -1,6 +1,14 @@
-const CARD_VERSION = "2.0.3";
+const CARD_VERSION = "2.1.0";
 const NEW_REMOTE = "__new_remote__";
 const NEW_BUTTON = "__new_button__";
+const CARD_DEFAULTS = Object.freeze({
+  title: "Tapo IR Control Panel",
+  default_hub: "",
+  default_remote: "",
+  learn_timeout: 30,
+  show_waveform: true,
+  trim_silence: false,
+});
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -11,16 +19,41 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function cardConfig(config) {
+  if (!config || typeof config !== "object" || Array.isArray(config)) {
+    throw new Error("Invalid Tapo IR Control Panel configuration");
+  }
+  for (const name of ["title", "default_hub", "default_remote"]) {
+    if (config[name] !== undefined && typeof config[name] !== "string") {
+      throw new Error(`${name} must be a string`);
+    }
+  }
+  for (const name of ["show_waveform", "trim_silence"]) {
+    if (config[name] !== undefined && typeof config[name] !== "boolean") {
+      throw new Error(`${name} must be a boolean`);
+    }
+  }
+  const timeout = Number(config.learn_timeout ?? CARD_DEFAULTS.learn_timeout);
+  return {
+    ...CARD_DEFAULTS, ...config,
+    learn_timeout: Math.trunc(Math.max(5, Math.min(120, Number.isFinite(timeout) ? timeout : 30))),
+  };
+}
+
 function codePreview(code) {
   if (!code) return '<div class="empty">Save or preview a code to visualize it.</div>';
+  if (code.length > 2000000) return '<div class="error">IR code is too large.</div>';
   let parsed;
   try {
     parsed = JSON.parse(code);
   } catch (_error) {
     return '<div class="error">The code is not valid JSON.</div>';
   }
-  if (!Number.isInteger(parsed.pwm) || typeof parsed.pulse !== "string") {
-    if (typeof parsed.protocol_name === "string" && Number.isInteger(parsed.pwm)) {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return '<div class="error">IR code must be a JSON object.</div>';
+  }
+  if (!Number.isInteger(parsed.pwm) || parsed.pwm <= 0 || typeof parsed.pulse !== "string") {
+    if (typeof parsed.protocol_name === "string" && Number.isInteger(parsed.pwm) && parsed.pwm > 0) {
       return `
         <div class="reference">
           <ha-icon icon="mdi:link-variant"></ha-icon>
@@ -33,13 +66,15 @@ function codePreview(code) {
     return '<div class="error">Expected {"pwm":number,"pulse":"..."}.</div>';
   }
 
+  if (!parsed.pulse.trim()) return '<div class="error">The pulse data is empty.</div>';
   const numeric = parsed.pulse
     .trim()
     .split(/[\s,;]+/)
     .filter(Boolean)
     .map(Number);
   const isNumeric =
-    numeric.length > 1 && numeric.every((value) => Number.isFinite(value));
+    /^\s*-?\d+(?:[\s,;]+-?\d+)*\s*$/.test(parsed.pulse) &&
+    numeric.every((value) => Number.isFinite(value));
   const samples = isNumeric
     ? numeric.slice(0, 500).map((value) => Math.abs(value))
     : [...parsed.pulse.slice(0, 500)].map((value) => value.charCodeAt(0));
@@ -57,7 +92,7 @@ function codePreview(code) {
     const y = index % 2 === 0 ? height / 2 - amplitude : height / 2 + amplitude;
     path += ` L ${x.toFixed(2)} ${y.toFixed(2)}`;
   });
-  const mode = isNumeric ? "numeric pulse train" : "encoded pulse bytes";
+  const mode = isNumeric ? "numeric pulse values (not a timing plot)" : "encoded text characters (not a decoded waveform)";
   return `
     <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="IR waveform">
       <line x1="0" y1="${height / 2}" x2="${width}" y2="${height / 2}"></line>
@@ -71,7 +106,7 @@ class TapoIrControlCard extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
-    this._config = {};
+    this._config = { ...CARD_DEFAULTS };
     this._hass = undefined;
     this._loaded = false;
     this._loading = false;
@@ -86,23 +121,42 @@ class TapoIrControlCard extends HTMLElement {
     this._message = "";
     this._error = "";
     this._learningRow = null;
+    this._busy = false;
+    this._retryAfter = 0;
+    this._remoteNameEdit = null;
     this.shadowRoot.addEventListener("change", (event) => this._onChange(event));
     this.shadowRoot.addEventListener("input", (event) => this._onInput(event));
     this.shadowRoot.addEventListener("click", (event) => this._onClick(event));
   }
 
   static getStubConfig() {
-    return { title: "Tapo IR Control Panel" };
+    return { ...CARD_DEFAULTS };
+  }
+
+  static getConfigElement() {
+    return document.createElement("tapo-ir-control-card-editor");
   }
 
   setConfig(config) {
-    this._config = { title: "Tapo IR Control Panel", ...(config || {}) };
+    const previous = this._config;
+    this._config = cardConfig(config);
+    if (!this._loaded && this._draftRows.length === 1 &&
+        !this._draftRows[0].label && !this._draftRows[0].code) {
+      this._draftRows[0].trim_silence = this._config.trim_silence;
+    }
+    if (
+      this._loaded && !this._busy && !this._learningRow &&
+      (previous.default_hub !== this._config.default_hub ||
+        previous.default_remote !== this._config.default_remote)
+    ) {
+      this._applyConfiguredSelection();
+    }
     this._render();
   }
 
   set hass(hass) {
     this._hass = hass;
-    if (!this._loaded && !this._loading) this._load();
+    if (!this._loaded && !this._loading && Date.now() >= this._retryAfter) this._load();
   }
 
   getCardSize() {
@@ -114,7 +168,7 @@ class TapoIrControlCard extends HTMLElement {
       id: `draft-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       label: "",
       code: "",
-      trim_silence: false,
+      trim_silence: this._config.trim_silence,
     };
   }
 
@@ -124,29 +178,69 @@ class TapoIrControlCard extends HTMLElement {
   }
 
   async _load() {
+    if (this._loading) return;
+    const initialLoad = !this._loaded;
     this._loading = true;
     this._error = "";
     this._render();
     try {
       const result = await this._call({ type: "tapo_ir/remotes/list" });
       this._hubs = result.hubs || [];
-      if (!this._selectedHub && this._hubs.length) {
-        this._selectedHub = this._hubs[0].entry_id;
-      }
+      this._error = (result.errors || []).map((item) => `${item.name}: ${item.message}`).join("; ");
+      if (initialLoad) this._applyConfiguredSelection();
       const remotes = this._remotes();
       if (
         this._selectedRemote !== NEW_REMOTE &&
         !remotes.some((item) => item.remote.device_id === this._selectedRemote)
       ) {
         this._selectedRemote = remotes[0]?.remote.device_id || NEW_REMOTE;
+        this._resetSelectionEdits();
+      }
+      if (!this._hubs.some((hub) => hub.entry_id === this._selectedHub)) {
+        this._selectedHub = this._hubs[0]?.entry_id || "";
+      }
+      if (this._selectedButton !== NEW_BUTTON && !this._button()) {
+        this._selectedButton = NEW_BUTTON;
       }
       this._loaded = true;
     } catch (error) {
       this._error = this._errorText(error);
+      this._retryAfter = Date.now() + 10000;
     } finally {
       this._loading = false;
       this._render();
     }
+  }
+
+  _applyConfiguredSelection() {
+    this._resetSelectionEdits();
+    if (!this._hubs.length) {
+      this._selectedHub = "";
+      this._selectedRemote = NEW_REMOTE;
+      return;
+    }
+    const preferredHub = this._hubs.find((hub) =>
+      [hub.entry_id, hub.hub_id, hub.name].includes(this._config.default_hub)
+    );
+    this._selectedHub = (preferredHub || this._hubs[0]).entry_id;
+
+    const preferredRemote = this._remotes().find(({ hub, remote }) => {
+      const remoteMatches = [remote.device_id, remote.name].includes(
+        this._config.default_remote
+      );
+      return remoteMatches && (!preferredHub || hub.entry_id === preferredHub.entry_id);
+    });
+    this._selectedRemote = preferredRemote
+      ? preferredRemote.remote.device_id
+      : NEW_REMOTE;
+  }
+
+  _resetSelectionEdits() {
+    this._selectedButton = NEW_BUTTON;
+    this._draftRows = [this._newRow()];
+    this._rowEdits.clear();
+    this._previews.clear();
+    this._remoteNameEdit = null;
   }
 
   _errorText(error) {
@@ -212,6 +306,16 @@ class TapoIrControlCard extends HTMLElement {
       </ha-card>
       ${this._styles()}
     `;
+    if (this._busy || this._learningRow) {
+      for (const element of this.shadowRoot.querySelectorAll("select, button")) {
+        element.disabled = element.dataset.action !== "stop-learn";
+      }
+    }
+    if (this._busy) {
+      for (const element of this.shadowRoot.querySelectorAll("input, textarea")) {
+        element.disabled = true;
+      }
+    }
   }
 
   _renderEditor() {
@@ -308,7 +412,7 @@ class TapoIrControlCard extends HTMLElement {
       <section class="remote-editor">
         <label>Remote name</label>
         <div class="inline">
-          <input data-field="remote-name" maxlength="64" value="${escapeHtml(remote.name)}">
+          <input data-field="remote-name" maxlength="64" value="${escapeHtml(this._remoteNameEdit ?? remote.name)}">
           <button class="icon" data-action="rename" title="Save remote name" aria-label="Save remote name">
             <ha-icon icon="mdi:content-save"></ha-icon>
           </button>
@@ -366,6 +470,9 @@ class TapoIrControlCard extends HTMLElement {
             <ha-icon icon="mdi:refresh"></ha-icon>
           </button>
           ${this._learnButton(row.id)}
+          <button class="icon" data-action="delete-row" title="${row.key_reference ? "Delete saved button" : "Remove draft"}" aria-label="${row.key_reference ? "Delete saved button" : "Remove draft"}">
+            <ha-icon icon="mdi:delete-outline"></ha-icon>
+          </button>
           ${
             learning
               ? `<button class="icon stop" data-action="stop-learn" title="Stop learning" aria-label="Stop learning">
@@ -380,7 +487,11 @@ class TapoIrControlCard extends HTMLElement {
             Trim explicit zero padding
           </label>
         </div>
-        <div class="wave">${codePreview(visualCode)}</div>
+        ${
+          this._config.show_waveform
+            ? `<div class="wave">${codePreview(visualCode)}</div>`
+            : ""
+        }
       </article>
     `;
   }
@@ -421,6 +532,7 @@ class TapoIrControlCard extends HTMLElement {
   }
 
   _onChange(event) {
+    if (this._busy || this._learningRow) return;
     const field = event.target.dataset.field;
     if (field === "remote") {
       this._selectedRemote = event.target.value;
@@ -428,6 +540,7 @@ class TapoIrControlCard extends HTMLElement {
       this._draftRows = [this._newRow()];
       this._rowEdits.clear();
       this._previews.clear();
+      this._remoteNameEdit = null;
       this._render();
     } else if (field === "button") {
       this._selectedButton = event.target.value;
@@ -443,6 +556,7 @@ class TapoIrControlCard extends HTMLElement {
   _onInput(event) {
     const field = event.target.dataset.field;
     if (field === "new-remote-name") this._newRemoteName = event.target.value;
+    if (field === "remote-name") this._remoteNameEdit = event.target.value;
     const rowElement = this._rowElement(event.target);
     if (rowElement) this._rememberRow(this._rowState(rowElement));
   }
@@ -451,6 +565,8 @@ class TapoIrControlCard extends HTMLElement {
     const button = event.composedPath().find((item) => item?.dataset?.action);
     if (!button) return;
     const action = button.dataset.action;
+    if (button.disabled || this._busy ||
+        (this._learningRow && action !== "stop-learn")) return;
     this._error = "";
     this._message = "";
     if (action === "reload") {
@@ -478,6 +594,10 @@ class TapoIrControlCard extends HTMLElement {
       await this._saveRow(this._rowState(this._rowElement(button)));
       return;
     }
+    if (action === "delete-row") {
+      await this._deleteRow(this._rowState(this._rowElement(button)));
+      return;
+    }
     if (action === "rename") {
       await this._renameRemote();
       return;
@@ -492,6 +612,11 @@ class TapoIrControlCard extends HTMLElement {
   }
 
   async _saveRow(row) {
+    if (this._busy || this._learningRow) return;
+    this._rememberRow(row);
+    this._busy = true;
+    this._error = "";
+    this._render();
     try {
       let result;
       if (this._selectedRemote === NEW_REMOTE) {
@@ -509,7 +634,7 @@ class TapoIrControlCard extends HTMLElement {
           ],
         });
         this._selectedRemote = result.remote_device_id;
-        this._selectedButton = NEW_BUTTON;
+        this._selectedButton = result.keys?.[0]?.key_name || NEW_BUTTON;
         this._newRemoteName = "";
       } else {
         result = await this._call({
@@ -521,30 +646,102 @@ class TapoIrControlCard extends HTMLElement {
           trim_silence: row.trim_silence,
         });
         this._selectedButton = result.key_name;
-        this._rowEdits.delete(row.id);
-        this._previews.set(`saved-${result.key_name}`, result.code);
       }
-      this._message = "Saved and verified against the hub.";
-      this._draftRows = [this._newRow()];
+      const verification = result.keys?.[0] || result;
+      if (verification.key_name) {
+        this._rowEdits.delete(row.id);
+        this._rowEdits.set(`saved-${verification.key_name}`, {
+          ...row,
+          id: `saved-${verification.key_name}`,
+          key_reference: verification.key_name,
+          code: verification.code,
+        });
+        this._previews.set(`saved-${verification.key_name}`, verification.code);
+      }
+      this._message = verification.waveform_verified === false
+        ? "Saved; hub identity and label confirmed. The hub does not expose the saved waveform for comparison."
+        : "Saved and verified against the hub.";
+      const remaining = this._draftRows.filter((item) => item.id !== row.id);
+      this._draftRows = remaining.length ? remaining : [this._newRow()];
+      if (remaining.some((item) => item.label || item.code)) this._selectedButton = NEW_BUTTON;
       await this._load();
     } catch (error) {
       this._error = this._errorText(error);
+    } finally {
+      this._busy = false;
+      this._render();
+    }
+  }
+
+  async _deleteRow(row) {
+    if (this._busy || this._learningRow) return;
+    if (!row.key_reference) {
+      if ((row.label || row.code) &&
+          !window.confirm("Discard this unsaved button draft?")) return;
+      this._draftRows = this._draftRows.filter((item) => item.id !== row.id);
+      if (!this._draftRows.length) this._draftRows = [this._newRow()];
+      this._previews.delete(row.id);
+      this._message = "Draft removed. Nothing was changed on the hub.";
+      this._render();
+      return;
+    }
+    const remote = this._remote()?.remote;
+    const key = (remote?.keys || []).find((item) => item.name === row.key_reference);
+    if (!key) {
+      this._error = "This button is no longer available. Reload the card before deleting.";
+      this._render();
+      return;
+    }
+    if (!window.confirm(
+      `Delete "${key.label}" from "${remote.name}" on the hub? This cannot be undone. ` +
+      "The remote and its other buttons will not be deleted. Any dashboards or automations using this button will stop working."
+    )) return;
+    this._rememberRow(row);
+    this._busy = true;
+    this._error = "";
+    this._message = "";
+    this._render();
+    try {
+      await this._call({
+        type: "tapo_ir/key/delete",
+        remote_device_id: remote.device_id,
+        key_reference: key.name,
+        confirmation: "DELETE",
+      });
+      this._rowEdits.delete(row.id);
+      this._previews.delete(row.id);
+      remote.keys = remote.keys.filter((item) => item.name !== key.name);
+      this._selectedButton = NEW_BUTTON;
+      this._message = "Button deleted and removal verified against the hub.";
+      await this._load();
+    } catch (error) {
+      this._error = this._errorText(error);
+    } finally {
+      this._busy = false;
       this._render();
     }
   }
 
   async _renameRemote() {
+    if (this._busy || this._learningRow) return;
     const input = this.shadowRoot.querySelector('[data-field="remote-name"]');
+    const name = input.value;
+    this._remoteNameEdit = name;
+    this._busy = true;
+    this._render();
     try {
       await this._call({
         type: "tapo_ir/remote/rename",
         remote_device_id: this._selectedRemote,
-        name: input.value,
+        name,
       });
       this._message = "Remote name saved and verified.";
+      this._remoteNameEdit = null;
       await this._load();
     } catch (error) {
       this._error = this._errorText(error);
+    } finally {
+      this._busy = false;
       this._render();
     }
   }
@@ -564,6 +761,7 @@ class TapoIrControlCard extends HTMLElement {
   }
 
   async _learn(target) {
+    if (this._busy || this._learningRow) return;
     const anchor = this._learningAnchor();
     const rowElement = this._targetRow(target);
     if (!anchor || !rowElement) {
@@ -572,15 +770,15 @@ class TapoIrControlCard extends HTMLElement {
       return;
     }
     const row = this._rowState(rowElement);
-    this._updateDraft(row);
+    this._rememberRow(row);
     this._learningRow = row.id;
-    this._message = "Learning for up to 30 seconds. Press the physical remote now.";
+    this._message = `Learning for up to ${this._config.learn_timeout} seconds. Press the physical remote now.`;
     this._render();
     try {
       const result = await this._call({
         type: "tapo_ir/learn",
         ...anchor,
-        timeout: 30,
+        timeout: this._config.learn_timeout,
       });
       const current = row.id.startsWith("draft-")
         ? this._draftRows.find((item) => item.id === row.id) || row
@@ -598,12 +796,11 @@ class TapoIrControlCard extends HTMLElement {
 
   async _stopLearning() {
     try {
-      await this._call({ type: "tapo_ir/learn/stop" });
-      this._message = "Learning stopped.";
+      await this._call({ type: "tapo_ir/learn/stop", ...this._learningAnchor() });
+      this._message = "Stop requested; waiting for receive-mode cleanup.";
     } catch (error) {
       this._error = this._errorText(error);
     }
-    this._learningRow = null;
     this._render();
   }
 
@@ -662,6 +859,176 @@ class TapoIrControlCard extends HTMLElement {
       </style>
     `;
   }
+}
+
+class TapoIrControlCardEditor extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: "open" });
+    this._config = { ...CARD_DEFAULTS };
+    this._hass = undefined;
+    this._hubs = [];
+    this._loaded = false;
+    this._loading = false;
+    this._retryAfter = 0;
+    this._error = "";
+    this.shadowRoot.addEventListener("input", (event) => this._valueChanged(event));
+    this.shadowRoot.addEventListener("change", (event) => this._valueChanged(event));
+  }
+
+  setConfig(config) {
+    const nextConfig = cardConfig(config || {});
+    const changed = JSON.stringify(nextConfig) !== JSON.stringify(this._config);
+    this._config = nextConfig;
+    if (changed || !this.shadowRoot.innerHTML) this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    if (!this._loaded && !this._loading && Date.now() >= this._retryAfter) this._loadOptions();
+  }
+
+  async _loadOptions() {
+    if (!this._hass) return;
+    this._loading = true;
+    this._error = "";
+    this._render();
+    try {
+      const result = await this._hass.connection.sendMessagePromise({
+        type: "tapo_ir/remotes/list",
+      });
+      this._hubs = result.hubs || [];
+      this._error = (result.errors || []).map((item) => `${item.name}: ${item.message}`).join("; ");
+      this._loaded = true;
+    } catch (error) {
+      this._hubs = [];
+      this._loaded = false;
+      this._error = error?.message || "Hub discovery failed. Options remain editable in YAML.";
+      this._retryAfter = Date.now() + 10000;
+    } finally {
+      this._loading = false;
+      this._render();
+    }
+  }
+
+  _remoteOptions() {
+    const selectedHub = this._config.default_hub;
+    return this._hubs
+      .filter(
+        (hub) =>
+          !selectedHub ||
+          [hub.entry_id, hub.hub_id, hub.name].includes(selectedHub)
+      )
+      .flatMap((hub) =>
+        (hub.remotes || []).map((remote) => ({
+          value: remote.device_id,
+          label: `${remote.name} - ${hub.name}`,
+        }))
+      );
+  }
+
+  _valueChanged(event) {
+    const name = event.target.dataset.config;
+    if (!name) return;
+    let value =
+      event.target.type === "checkbox" ? event.target.checked : event.target.value;
+    if (name === "learn_timeout") {
+      value = cardConfig({ learn_timeout: value }).learn_timeout;
+    }
+    const config = { ...this._config, [name]: value };
+    if (name === "default_hub") config.default_remote = "";
+    this._config = config;
+    this.dispatchEvent(
+      new CustomEvent("config-changed", {
+        detail: { config },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    if (name === "default_hub") this._render();
+  }
+
+  _render() {
+    if (!this.shadowRoot) return;
+    const hubOptions = this._hubs
+      .map(
+        (hub) =>
+          `<option value="${escapeHtml(hub.entry_id)}" ${
+            [hub.entry_id, hub.hub_id, hub.name].includes(this._config.default_hub)
+              ? "selected"
+              : ""
+          }>${escapeHtml(hub.name)}</option>`
+      )
+      .join("");
+    const remoteOptions = this._remoteOptions()
+      .map(
+        (remote) =>
+          `<option value="${escapeHtml(remote.value)}" ${
+            remote.value === this._config.default_remote ? "selected" : ""
+          }>${escapeHtml(remote.label)}</option>`
+      )
+      .join("");
+    const unknownHub = this._config.default_hub && !this._hubs.some((hub) =>
+      [hub.entry_id, hub.hub_id, hub.name].includes(this._config.default_hub));
+    const unknownRemote = this._config.default_remote &&
+      !this._remoteOptions().some((remote) => remote.value === this._config.default_remote);
+
+    this.shadowRoot.innerHTML = `
+      <div class="editor">
+        <label>Title
+          <input data-config="title" value="${escapeHtml(this._config.title)}">
+        </label>
+        <label>Default hub
+          <select data-config="default_hub" ${this._loading ? "disabled" : ""}>
+            <option value="">First available hub</option>
+            ${unknownHub ? `<option selected value="${escapeHtml(this._config.default_hub)}">Configured: ${escapeHtml(this._config.default_hub)}</option>` : ""}
+            ${hubOptions}
+          </select>
+        </label>
+        <label>Default remote
+          <select data-config="default_remote" ${this._loading ? "disabled" : ""}>
+            <option value="">New Remote</option>
+            ${unknownRemote ? `<option selected value="${escapeHtml(this._config.default_remote)}">Configured: ${escapeHtml(this._config.default_remote)}</option>` : ""}
+            ${remoteOptions}
+          </select>
+        </label>
+        <label>Learning timeout (seconds)
+          <input data-config="learn_timeout" type="number" min="5" max="120" step="1"
+            value="${escapeHtml(this._config.learn_timeout)}">
+        </label>
+        <label class="check">
+          <input data-config="show_waveform" type="checkbox" ${
+            this._config.show_waveform ? "checked" : ""
+          }>
+          Show waveform visualization
+        </label>
+        <label class="check">
+          <input data-config="trim_silence" type="checkbox" ${
+            this._config.trim_silence ? "checked" : ""
+          }>
+          Trim numeric zero padding by default
+        </label>
+        <p>All options are stored in the card YAML and can be edited in either mode.</p>
+        ${this._error ? `<p role="alert">${escapeHtml(this._error)}</p>` : ""}
+      </div>
+      <style>
+        .editor { display: grid; gap: 14px; padding: 4px 0; }
+        label { display: grid; gap: 6px; color: var(--primary-text-color); }
+        input, select {
+          box-sizing: border-box; width: 100%; padding: 10px;
+          color: var(--primary-text-color); background: var(--card-background-color);
+          border: 1px solid var(--divider-color); border-radius: 6px; font: inherit;
+        }
+        .check { display: flex; align-items: center; gap: 8px; }
+        .check input { width: auto; }
+        p { margin: 0; color: var(--secondary-text-color); font-size: .86rem; }
+      </style>
+    `;
+  }
+}
+
+if (!customElements.get("tapo-ir-control-card-editor")) {
+  customElements.define("tapo-ir-control-card-editor", TapoIrControlCardEditor);
 }
 
 if (!customElements.get("tapo-ir-control-card")) {

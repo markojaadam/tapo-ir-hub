@@ -20,6 +20,7 @@ from .compat import (
     connect,
 )
 from .const import IR_CATEGORY
+from .errors import TapoIrAuthError, TapoIrConnectionError, TapoIrError
 from .naming import (
     humanize_key_label,
     humanize_remote_name,
@@ -30,16 +31,33 @@ from .protocol import ProtocolResponseError, validate_protocol_response
 _LOGGER = logging.getLogger(__name__)
 
 
-class TapoIrError(Exception):
-    """Base error for the Tapo IR API."""
-
-
-class TapoIrAuthError(TapoIrError):
-    """Raised when the hub rejects supplied credentials."""
-
-
-class TapoIrConnectionError(TapoIrError):
-    """Raised when the hub cannot be reached or a request fails."""
+def extract_remote_info(response: Any) -> dict[str, Any]:
+    """Find child device info inside direct or wrapped protocol responses."""
+    if isinstance(response, dict):
+        if response.get("category") == IR_CATEGORY or "key_list" in response:
+            return response
+        for key in (
+            "get_device_info",
+            "result",
+            "responseData",
+            "multipleRequest",
+            "responses",
+        ):
+            if key not in response:
+                continue
+            try:
+                return extract_remote_info(response[key])
+            except TapoIrConnectionError:
+                continue
+    elif isinstance(response, list):
+        for item in response:
+            try:
+                return extract_remote_info(item)
+            except TapoIrConnectionError:
+                continue
+    raise TapoIrConnectionError(
+        "The hub did not return a complete IR remote record"
+    )
 
 
 def parse_child_devices(
@@ -162,7 +180,10 @@ def pick_icon(label: str) -> str:
     """Choose a conservative Material Design icon from a normalized label."""
     lowered = label.casefold()
     for hint, icon in _ICON_HINTS:
-        if lowered == hint or hint in lowered.split():
+        if lowered == hint:
+            return icon
+    for hint, icon in _ICON_HINTS:
+        if f" {hint} " in f" {lowered} ":
             return icon
     return "mdi:remote"
 
@@ -235,15 +256,22 @@ class TapoIrApi:
             last_error: Exception | None = None
             for _attempt in range(attempts):
                 try:
-                    client = await self._get_client()
-                    response = await client.execute_raw_request(request)
+                    async with asyncio.timeout(30):
+                        client = await self._get_client()
+                        response = await client.execute_raw_request(request)
                     if response.is_success():
                         result = response.get()
                         return result if isinstance(result, dict) else {"result": result}
                     last_error = TapoIrConnectionError(str(response.error()))
+                except asyncio.CancelledError:
+                    await self._async_drop_device()
+                    raise
                 except Exception as err:  # plugp100 exposes version-specific errors
                     last_error = err
                 await self._async_drop_device()
+                message = str(last_error).casefold()
+                if any(token in message for token in ("auth", "credential", "password", "1501")):
+                    raise TapoIrAuthError(str(last_error)) from last_error
             raise TapoIrConnectionError(str(last_error)) from last_error
 
     async def async_connect(self) -> None:
@@ -281,9 +309,46 @@ class TapoIrApi:
 
     async def async_get_raw_devices(self) -> list[dict[str, Any]]:
         """Read and cache the hub's raw IR child records."""
-        raw = await self._request(TapoRequest.get_child_device_list(0))
-        self._raw_children = deepcopy(raw.get("child_device_list") or [])
+        children: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        while True:
+            raw = await self._request(TapoRequest.get_child_device_list(len(children)))
+            try:
+                validate_protocol_response(raw, "get_child_device_list")
+            except ProtocolResponseError as err:
+                raise TapoIrConnectionError(str(err)) from err
+            page = raw.get("child_device_list")
+            if not isinstance(page, list):
+                raise TapoIrConnectionError("Hub returned no child device list")
+            total = raw.get("sum", len(children) + len(page))
+            if type(total) is not int or total < 0:
+                raise TapoIrConnectionError("Hub returned an invalid child device count")
+            if not page and len(children) < total:
+                raise TapoIrConnectionError("Hub returned an incomplete child device list")
+            for child in page:
+                if not isinstance(child, dict) or not child.get("device_id"):
+                    raise TapoIrConnectionError("Hub returned an invalid child record")
+                identity = str(child["device_id"])
+                if identity in seen:
+                    raise TapoIrConnectionError("Hub repeated a child device page")
+                seen.add(identity)
+                children.append(child)
+            if len(children) >= total:
+                break
+        self._raw_children = deepcopy(
+            [child for child in children if child.get("category") == IR_CATEGORY]
+        )
         return deepcopy(self._raw_children)
+
+    async def async_get_raw_remote(
+        self, device_id: str
+    ) -> dict[str, Any]:
+        """Read one child directly so mutation verification bypasses caches."""
+        response = await self.async_query_child(
+            device_id,
+            "get_device_info",
+        )
+        return deepcopy(extract_remote_info(response))
 
     async def async_enumerate(
         self, *, include_codes: bool = False

@@ -112,7 +112,7 @@ class TapoIrKeyButton(CoordinatorEntity[TapoIrCoordinator], ButtonEntity):
             (
                 key
                 for key in device["keys"]
-                if key["name"] == self._key_name
+                if key_unique_id(self._device_id, key) == self._attr_unique_id
             ),
             None,
         )
@@ -126,18 +126,21 @@ class TapoIrKeyButton(CoordinatorEntity[TapoIrCoordinator], ButtonEntity):
         """Expose identity metadata, never the large waveform."""
         key = self._current_key() or {}
         return {
-            "protocol_name": self._key_name,
+            "protocol_name": key.get("name", self._key_name),
             "label_source": key.get("label_source"),
         }
 
     @callback
     def _handle_coordinator_update(self) -> None:
         if key := self._current_key():
+            self._key_name = key["name"]
             self._attr_name = key["label"]
             self._attr_icon = key["icon"]
         self.async_write_ha_state()
 
     async def async_press(self) -> None:
+        if key := self._current_key():
+            self._key_name = key["name"]
         await self.coordinator.async_fire(self._device_id, self._key_name)
 
 

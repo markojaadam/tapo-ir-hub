@@ -28,7 +28,8 @@ management.
 
 ## Requirements
 
-- Home Assistant 2024.6 or newer
+- Home Assistant 2026.8 or newer (the shared adapter uses current core
+  TP-Link runtime and entity-registry APIs)
 - A Tapo H1xx IR hub reachable on the local network
 - For the recommended connection: a compatible hub configured in Home
   Assistant's TP-Link integration
@@ -87,10 +88,20 @@ Add it from the dashboard card picker or use:
 ```yaml
 type: custom:tapo-ir-control-card
 title: Tapo IR Control Panel
+default_hub: ""
+default_remote: ""
+learn_timeout: 30
+show_waveform: true
+trim_silence: false
 ```
 
 The card is designed for utility rather than remote control. It cannot transmit
 an IR command.
+
+The card supports both Home Assistant's Visual Editor and direct YAML editing.
+The optional `default_hub` accepts a hub entry ID, hub ID, or hub name;
+`default_remote` accepts a remote device ID or name. The learning timeout is
+limited to 5-120 seconds.
 
 ### Manage an existing remote
 
@@ -103,6 +114,15 @@ an IR command.
    - **Refresh** redraws the visualization from the current text.
    - **Brain** starts IR learning.
    - **Stop** ends an active learning session.
+   - **Trash** deletes a saved button from the hub after confirmation, or
+     discards an unsaved draft without contacting the hub.
+
+Deletion verifies that the saved button is gone before reporting success.
+It does not delete the remote, even when removing its last button. Other buttons
+and unsaved drafts are preserved. Existing Home Assistant references to a deleted
+button become unavailable; update affected dashboards and automations and remove
+the obsolete entity from the entity registry if no longer needed. Deletion cannot
+be undone, so copy any available code before proceeding.
 
 Editable waveforms use this representation:
 
@@ -110,9 +130,9 @@ Editable waveforms use this representation:
 {"pwm":26,"pulse":"..."}
 ```
 
-Numeric pulse trains are drawn as alternating marks and spaces. Encoded pulse
-strings receive a byte-level visualization so captures can be compared without
-guessing their protocol.
+Numeric pulse values are plotted in sequence, not to a timing scale. Opaque
+encodings receive a character-level comparison plot, not a decoded waveform.
+Previewing does not prove that a code will control an appliance.
 
 Some factory-provided keys are exposed by the hub only as a protocol name and
 PWM value. These keys remain fully usable for control. The card displays the
@@ -124,14 +144,18 @@ the saved code can be replaced.
 Choose **+ New Remote**, select the target hub, and enter the remote name plus
 its first button. The remote is saved only after the first button has been
 written and verified. If that transaction fails, the partially created remote
-is removed.
+is removed when it can be identified safely and cleanup succeeds. If the hub
+disconnects during creation or cleanup, inspect its remote list before retrying.
+An unidentified remote is never adopted or deleted based on timing alone.
 
 ### Learn an IR code
 
-The brain button places the hub in receive mode for up to 30 seconds. A captured
+The brain button places the hub in receive mode for the configured timeout
+(30 seconds by default). A captured
 signal fills the editor and updates the visualization, but it is not stored
 until **Save** is selected. Receive mode is stopped after capture, timeout,
-error, or a manual stop.
+error, or a manual stop. Stop applies to the selected hub; the editor remains
+locked until cleanup finishes. A failed stop is reported explicitly.
 
 The optional trim control removes explicit leading and trailing zero tokens
 from numeric pulse sequences. It does not modify opaque encodings.
@@ -139,6 +163,11 @@ from numeric pulse sequences. It does not modify opaque encodings.
 Management commands use Home Assistant's authenticated WebSocket API and
 require an administrator account. Full waveform data is requested only while
 using the editor and is not placed in normal entity states.
+
+Some hubs hide pulse data even after accepting a learned button. In that case
+the editor confirms the saved identity and label, but explicitly reports that
+the waveform itself could not be compared. The last submitted code remains
+visible for that editing session; it is not represented as hub-read waveform data.
 
 ## Tapo IR Card
 
@@ -187,7 +216,7 @@ retried automatically.
 - Shared IR availability follows the owning TP-Link coordinator; cached remote
   data is never presented as healthy after a failed parent refresh.
 - Writes are refreshed and compared with their read-back result.
-- Remote creation is transactional and rolls back incomplete work.
+- Remote creation attempts verified cleanup of incomplete work.
 - Nested protocol failures are surfaced instead of reported as success.
 - AC commands do not fill unknown state with assumed values.
 - Entity states contain command identity and friendly metadata, not raw pulse
@@ -199,6 +228,18 @@ Config-entry diagnostics contain parent health and remote inventory while
 redacting credentials, network addresses, device identifiers, and IR
 waveforms. An unavailable shared parent also creates a Home Assistant Repair
 issue that clears automatically after recovery.
+
+### Options and removal
+
+Use the integration's options to set the refresh interval (30-3600 seconds,
+300 by default) and optional JSON name overrides mapping remote IDs to names.
+The hub's Rescan button requests an earlier refresh.
+
+To remove the integration, delete its entry under **Settings > Devices &
+services**, then uninstall it in HACS and restart Home Assistant. This removes
+Home Assistant entities, not remotes or codes stored on the hub. Remove any
+manually installed dashboard resources/cards separately. Shared TP-Link entries
+and entities are owned by the core integration and are not deleted.
 
 ## Troubleshooting
 
@@ -228,7 +269,14 @@ Run the focused checks:
 python -m unittest discover -s tests -v
 python -m compileall -q custom_components/tapo_ir
 node --check custom_components/tapo_ir/frontend/tapo-ir-control-card.js
+node --check lovelace/tapo-ir-card.js
+node tests/test_card.mjs
 ```
+
+These dependency-free regression tests simulate hub and Home Assistant
+boundaries. They do not certify all firmware versions or replace testing on a
+running Home Assistant instance. The quality-scale checklist tracks remaining
+work; no official integration tier is claimed.
 
 Release history and upgrade-specific details are available in
 [CHANGELOG.md](CHANGELOG.md) and the

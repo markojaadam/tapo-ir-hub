@@ -106,6 +106,7 @@ class TapoIrCard extends HTMLElement {
     this._collapsed = new Set(); // device_ids currently collapsed
     this._collapseInit = false;
     this._built = false;
+    this._error = "";
   }
 
   static getConfigElement() {
@@ -124,6 +125,7 @@ class TapoIrCard extends HTMLElement {
     this._hubFilter = asList(this._config.hub);
     this._sig = null; // force rebuild
     this._collapseInit = false;
+    if (this._hass) this._update();
   }
 
   set hass(hass) {
@@ -179,6 +181,13 @@ class TapoIrCard extends HTMLElement {
           /_rescan$/.test(e.unique_id || "")
       );
       (isHub ? hubs : children).set(did, ents);
+    }
+    // Hidden diagnostic entities must not hide their hub's child remotes.
+    for (const childId of children.keys()) {
+      const parentId = hass.devices[childId]?.via_device_id;
+      if (parentId && !hubs.has(parentId) && !children.has(parentId)) {
+        hubs.set(parentId, []);
+      }
     }
 
     const buildKeys = (did, ents) => {
@@ -244,7 +253,7 @@ class TapoIrCard extends HTMLElement {
       const dev = hass.devices[cid] || {};
       const target =
         hubList.find((h) => h.device_id === dev.via_device_id) ||
-        (hubList.length >= 1 ? hubList[0] : null);
+        (!dev.via_device_id && hubList.length === 1 && hubIds.length <= 1 ? hubList[0] : null);
       if (!target) continue;
       if (!matches(this._hubFilter, target.device_id)) continue;
       target.children.push(built);
@@ -270,9 +279,10 @@ class TapoIrCard extends HTMLElement {
     const sig = JSON.stringify(
       model.map((h) => [
         h.device_id,
+        h.name,
         h.rescan,
         h.sensors,
-        h.children.map((c) => [c.device_id, c.keys.map((k) => k.entity_id)]),
+        h.children.map((c) => [c.device_id, c.name, c.keys]),
       ])
     );
     if (sig !== this._sig || !this._built) {
@@ -305,6 +315,7 @@ class TapoIrCard extends HTMLElement {
       ${this._styles()}
       <ha-card>
         ${c.title ? `<h1 class="card-header">${esc(c.title)}</h1>` : ""}
+        <div class="action-error" role="alert">${esc(this._error)}</div>
         ${sections}
       </ha-card>`;
 
@@ -475,7 +486,7 @@ class TapoIrCard extends HTMLElement {
 
   /* ------------------------------------------------------------ interaction */
 
-  _onClick(ev) {
+  async _onClick(ev) {
     const path = ev.composedPath();
     const el = path.find((n) => n.dataset && n.dataset.action);
     if (!el) {
@@ -489,9 +500,16 @@ class TapoIrCard extends HTMLElement {
     const action = el.dataset.action;
     if (action === "press") {
       const entity = el.dataset.entity;
-      if (!entity) return;
-      this._hass.callService("button", "press", { entity_id: entity });
-      this._pulse(el);
+      if (!entity || el.disabled) return;
+      try {
+        await this._hass.callService("button", "press", { entity_id: entity });
+        this._error = "";
+        this._pulse(el);
+      } catch (error) {
+        this._error = error?.message || "The IR button request failed.";
+      }
+      const notice = this.shadowRoot.querySelector(".action-error");
+      if (notice) notice.textContent = this._error;
     } else if (action === "toggle") {
       const did = el.dataset.device;
       if (this._collapsed.has(did)) this._collapsed.delete(did);
@@ -532,7 +550,7 @@ class TapoIrCard extends HTMLElement {
     if (!root || !this._hass) return;
     for (const btn of root.querySelectorAll("button.key, button.rescan")) {
       const st = this._hass.states[btn.dataset.entity];
-      btn.toggleAttribute("disabled", !!(st && st.state === "unavailable"));
+      btn.toggleAttribute("disabled", !st || st.state === "unavailable");
     }
     for (const chip of root.querySelectorAll(".chip")) {
       const st = this._hass.states[chip.dataset.entity];

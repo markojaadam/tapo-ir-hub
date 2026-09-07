@@ -1,5 +1,55 @@
 # Changelog
 
+## 2.1.0 - 2026-09-05
+
+### Fixed
+
+- Learned custom buttons are verified from a direct child readback rather than
+  the parent coordinator cache.
+- Saving succeeds when the H110 replaces a provisional name such as
+  `custom_source` with its own canonical key name.
+- Creation readback never resolves to a pre-existing key. Hubs that hide pulse
+  data report metadata verification separately from waveform verification.
+- Reject ambiguous command aliases and validate complete command lists before
+  sending; honor inter-command delays.
+- Bound learning and cleanup, reject concurrent captures/saves, and scope card
+  stop requests to the selected hub. Idle receive status waits for a signal;
+  cancelled direct requests discard the interrupted session.
+- Preserve sibling button drafts, prevent duplicate save clicks, and reset
+  edits when configured remote selection changes.
+- Use fresh shared-parent reads after mutations, isolate per-hub discovery
+  errors, and keep last-scan diagnostics current.
+- Close validation sessions on every exit, run coordinator shutdown cleanup,
+  and preserve registry entries belonging to other integrations.
+- Validate new-remote codes before creation and refuse to guess ownership of
+  concurrently created remotes; verify rollback removal.
+- Handle paginated direct-mode inventories and runtime authentication failures.
+- Preserve unknown AC state, honor combined mode/temperature commands, and
+  serialize AC state updates.
+- Validate preview inputs without crashing; show discovery errors with bounded
+  retries and describe encoded visualizations honestly.
+- Refresh optional remote-card labels/icons, respect hub filters, disable
+  missing entities, retain remotes when hub diagnostics are hidden, and surface
+  action errors.
+- Redact identifier-indexed configuration maps in diagnostics and preserve
+  migration metadata during reconfiguration.
+
+### Compatibility
+
+- Require Home Assistant 2026.8 or newer for the core runtime and registry
+  interfaces used by this integration.
+
+### Added
+
+- Added a trash control beside Save and Learn: confirmed deletion of saved
+  buttons, verified child readback, and local removal of unsaved drafts.
+  Deletes are locked during learning/saving and preserve other buttons and drafts.
+- Added a Home Assistant Visual Editor for the Tapo IR Control Panel card.
+- Added YAML-backed options for title, default hub, default remote, learning
+  timeout, waveform visibility, and default numeric-silence trimming.
+- Added verified Mitsubishi hidden MAX fan support for matching AC profiles via
+  a transient `sendIrCmdAc` profile remap without modifying the stored remote.
+
 ## 2.0.3 - 2026-08-30
 
 ### Fixed
