@@ -25,9 +25,7 @@ rules:
     comment: The integration does not provide conditions.
   docs-high-level-description: done
   docs-installation-instructions: done
-  docs-removal-instructions:
-    status: todo
-    comment: Add an explicit removal and rollback section.
+  docs-removal-instructions: done
   docs-actions: done
   brands:
     status: todo
@@ -48,15 +46,21 @@ rules:
   docs-configuration-parameters: done
 
   # Gold
-  entity-translations: done
+  entity-translations:
+    status: todo
+    comment: Dynamic key-label normalization and card strings are currently English-only.
   entity-device-class: done
   devices: done
   entity-category: done
-  entity-disabled-by-default: done
+  entity-disabled-by-default:
+    status: todo
+    comment: Review diagnostic entity defaults without changing existing users' registries.
   discovery:
     status: exempt
     comment: Shared mode discovers loaded TP-Link entries; direct discovery is unsupported.
-  stale-devices: done
+  stale-devices:
+    status: todo
+    comment: Manual stale-device removal is supported; automatic stale-device cleanup needs lifecycle coverage.
   diagnostics: done
   exception-translations:
     status: todo

@@ -23,6 +23,8 @@ _TO_REDACT = {
     "host",
     "mac",
     "pulse",
+    "legacy_entity_ids",
+    "name_overrides",
 }
 
 

@@ -133,9 +133,8 @@ async def _validate_direct(data: dict[str, Any]) -> TapoIrApi:
         await api.async_connect()
         await api.async_enumerate()
         return api
-    except Exception:
+    finally:
         await api.async_close()
-        raise
 
 
 def _validate_overrides(raw: str) -> str | None:
@@ -168,7 +167,7 @@ class TapoIrConfigFlow(ConfigFlow, domain=DOMAIN):
             if hub is None:
                 return self.async_show_form(
                     step_id="user",
-                    data_schema=_shared_schema(hubs, include_direct=False),
+                    data_schema=_shared_schema(hubs),
                     errors={"base": "shared_hub_unavailable"},
                 )
             await self.async_set_unique_id(hub.hub_id)
@@ -202,7 +201,6 @@ class TapoIrConfigFlow(ConfigFlow, domain=DOMAIN):
             else:
                 await self.async_set_unique_id(api.hub_id)
                 self._abort_if_unique_id_configured()
-                await api.async_close()
                 return self.async_create_entry(
                     title=api.hub_name,
                     data={
@@ -241,7 +239,6 @@ class TapoIrConfigFlow(ConfigFlow, domain=DOMAIN):
             else:
                 await self.async_set_unique_id(api.hub_id)
                 self._abort_if_unique_id_mismatch(reason="wrong_hub")
-                await api.async_close()
                 return self.async_update_reload_and_abort(entry, data=merged)
         suggested = {CONF_USERNAME: entry.data.get(CONF_USERNAME, "")}
         if user_input:
@@ -269,7 +266,7 @@ class TapoIrConfigFlow(ConfigFlow, domain=DOMAIN):
                 if hub is None:
                     return self.async_show_form(
                         step_id="reconfigure",
-                        data_schema=_shared_schema(hubs),
+                        data_schema=_shared_schema(hubs, include_direct=False),
                         errors={"base": "shared_hub_unavailable"},
                     )
                 await self.async_set_unique_id(hub.hub_id)
@@ -277,6 +274,7 @@ class TapoIrConfigFlow(ConfigFlow, domain=DOMAIN):
                 return self.async_update_reload_and_abort(
                     entry,
                     data={
+                        **entry.data,
                         CONF_CONNECTION_MODE: CONNECTION_MODE_SHARED,
                         CONF_TPLINK_ENTRY_ID: selected,
                     },
@@ -306,10 +304,10 @@ class TapoIrConfigFlow(ConfigFlow, domain=DOMAIN):
             else:
                 await self.async_set_unique_id(api.hub_id)
                 self._abort_if_unique_id_mismatch(reason="wrong_hub")
-                await api.async_close()
                 return self.async_update_reload_and_abort(
                     entry,
                     data={
+                        **entry.data,
                         **user_input,
                         CONF_CONNECTION_MODE: CONNECTION_MODE_DIRECT,
                     },

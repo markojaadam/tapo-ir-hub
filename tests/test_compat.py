@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 from types import ModuleType
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).parents[1]
 COMPAT_PATH = ROOT / "custom_components" / "tapo_ir" / "compat.py"
@@ -26,11 +27,6 @@ async def _connect(config):
 
 class CompatTests(unittest.TestCase):
     """Load compat.py against each historical package layout."""
-
-    def tearDown(self) -> None:
-        for name in list(sys.modules):
-            if name.startswith("plugp100") or name.startswith("compat_under_test"):
-                sys.modules.pop(name, None)
 
     @staticmethod
     def _package(name: str) -> ModuleType:
@@ -72,11 +68,13 @@ class CompatTests(unittest.TestCase):
 
     def test_supports_all_known_factory_locations(self) -> None:
         for index, factory_path in enumerate(FACTORY_PATHS):
-            with self.subTest(factory_path=factory_path):
+            with self.subTest(factory_path=factory_path), patch.dict(sys.modules):
+                for name in list(sys.modules):
+                    if name.startswith("plugp100"):
+                        sys.modules.pop(name)
                 module = self._load_for(factory_path, index)
                 self.assertIs(module.DeviceConnectConfiguration, _FactoryConfig)
                 self.assertIs(module.connect, _connect)
-                self.tearDown()
 
 
 if __name__ == "__main__":

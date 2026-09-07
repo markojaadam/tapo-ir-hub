@@ -72,6 +72,27 @@ class AcTests(unittest.TestCase):
         with self.assertRaises(ac.AcStateError):
             ac.build_ac_payload({"P": 1, "M": 0, "T": 22})
 
+    def test_invalid_fallbacks_remain_unknown(self) -> None:
+        self.assertEqual(
+            ac.parse_ac_status(
+                {
+                    "on": "0",
+                    "ac_mode": "broken",
+                    "current_temp": "unknown",
+                    "wind_speed": {},
+                    "wind_direct": 0,
+                }
+            ),
+            {"P": 0, "D": 0},
+        )
+
+    def test_rejects_invalid_state_types(self) -> None:
+        for power in ("0", 2, None):
+            with self.subTest(power=power), self.assertRaises(ac.AcStateError):
+                ac.build_ac_payload(
+                    {"P": power, "M": 0, "T": 22, "S": 1, "D": 0}
+                )
+
     def test_detects_verified_mitsubishi_max_profile(self) -> None:
         profile = (
             "AA"

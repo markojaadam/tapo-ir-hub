@@ -11,6 +11,7 @@ from homeassistant.core import HomeAssistant
 from .ac import AcStateError, build_ac_payload, build_ac_profile_payload
 from .api import (
     TapoIrConnectionError,
+    extract_remote_info,
     parse_child_devices,
 )
 from .const import IR_CATEGORY
@@ -124,7 +125,7 @@ class TapoIrSharedApi:
         """Refresh the owning coordinator and reject stale cached data."""
         coordinator, hub = self._resolve()
         try:
-            await coordinator.async_request_refresh()
+            await coordinator.async_refresh()
         except Exception as err:
             raise TapoIrConnectionError(
                 f"Unable to refresh the shared TP-Link hub: {err}"
@@ -133,7 +134,10 @@ class TapoIrSharedApi:
             raise TapoIrConnectionError(
                 f"Core TP-Link hub {self._entry().title!r} is unavailable"
             )
-        return coordinator, hub
+        current_coordinator, current_hub = self._resolve()
+        if current_coordinator is not coordinator:
+            raise TapoIrConnectionError("The shared TP-Link hub reloaded during refresh")
+        return current_coordinator, current_hub
 
     async def async_connect(self) -> None:
         """Resolve the shared runtime and capture hub identity."""
@@ -165,6 +169,16 @@ class TapoIrSharedApi:
             deepcopy(getattr(child, "_info", None) or {})
             for child in _ir_children(hub)
         ]
+
+    async def async_get_raw_remote(
+        self, device_id: str
+    ) -> dict[str, Any]:
+        """Read one child directly so mutation verification bypasses caches."""
+        response = await self.async_query_child(
+            device_id,
+            "get_device_info",
+        )
+        return deepcopy(extract_remote_info(response))
 
     async def async_enumerate(
         self, *, include_codes: bool = False
@@ -217,7 +231,6 @@ class TapoIrSharedApi:
         batched: bool = False,
     ) -> dict[str, Any]:
         """Run a child method through the shared parent KLAP session."""
-        child = self._child(device_id)
         query: dict[str, Any] = {method: params}
         if batched:
             query = {
@@ -225,12 +238,21 @@ class TapoIrSharedApi:
                     "requests": [{"method": method, "params": params}]
                 }
             }
-        try:
-            response = await child.protocol.query(query)
-        except Exception as err:
+        attempts = 2 if method.startswith("get") else 1
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            child = self._child(device_id)
+            try:
+                response = await child.protocol.query(query)
+                break
+            except Exception as err:
+                last_error = err
+                if attempt + 1 < attempts:
+                    await self._async_refresh_parent()
+        else:
             raise TapoIrConnectionError(
-                f"Shared TP-Link child request {method} failed: {err}"
-            ) from err
+                f"Shared TP-Link child request {method} failed: {last_error}"
+            ) from last_error
         try:
             validate_protocol_response(response, method)
         except ProtocolResponseError as err:

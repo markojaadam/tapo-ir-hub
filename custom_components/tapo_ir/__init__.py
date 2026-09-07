@@ -1,6 +1,7 @@
 """Tapo IR Hub integration."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -133,8 +134,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up one Tapo IR hub."""
     overrides = _parse_overrides(entry.options.get(CONF_NAME_OVERRIDES))
     api = _build_api(hass, entry, overrides)
+    connected = False
     try:
         await api.async_connect()
+        connected = True
     except TapoIrAuthError as err:
         raise ConfigEntryAuthFailed(str(err)) from err
     except TapoIrError as err:
@@ -149,6 +152,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 translation_placeholders={"hub": entry.title},
             )
         raise ConfigEntryNotReady(str(err)) from err
+    finally:
+        if not connected:
+            await api.async_close()
 
     coordinator = TapoIrCoordinator(
         hass,
@@ -156,7 +162,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         api,
         entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
     )
-    await coordinator.async_config_entry_first_refresh()
+    try:
+        await coordinator.async_config_entry_first_refresh()
+    except (Exception, asyncio.CancelledError):
+        await coordinator.async_shutdown()
+        raise
     ir.async_delete_issue(
         hass,
         DOMAIN,

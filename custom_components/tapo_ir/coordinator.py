@@ -1,6 +1,7 @@
 """Data coordinator and mutation facade for one Tapo IR hub."""
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 import logging
 from typing import Any
@@ -41,10 +42,11 @@ class TapoIrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             config_entry=entry,
             name=f"{DOMAIN} ({api.host})",
             update_interval=timedelta(seconds=scan_interval),
-            always_update=False,
+            always_update=True,
         )
         self.api = api
-        self.manager = IRTransactionManager(hass, api)
+        self.manager = IRTransactionManager(hass, api, entry.entry_id)
+        self._ac_lock = asyncio.Lock()
         self.last_scan: datetime | None = None
         self._mitsubishi_max_states: dict[str, dict[str, int]] = {}
 
@@ -128,7 +130,23 @@ class TapoIrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         use_mitsubishi_max: bool | None = None,
         **changes: Any,
     ) -> None:
-        """Send a complete AC state and update the optimistic cached state."""
+        """Serialize a complete AC state update and its optimistic cache write."""
+        async with self._ac_lock:
+            await self._async_control_ac_locked(
+                device_id,
+                pressed_fid=pressed_fid,
+                use_mitsubishi_max=use_mitsubishi_max,
+                **changes,
+            )
+
+    async def _async_control_ac_locked(
+        self,
+        device_id: str,
+        *,
+        pressed_fid: int | None = None,
+        use_mitsubishi_max: bool | None = None,
+        **changes: Any,
+    ) -> None:
         device = (self.data or {}).get(device_id)
         if device is None or "ac_state" not in device:
             raise UpdateFailed(f"AC remote {device_id!r} is not available")
@@ -198,8 +216,17 @@ class TapoIrCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
 
     async def async_refresh_after_mutation(self) -> None:
         """Refresh entities after a verified hub mutation."""
-        await self.async_request_refresh()
+        await self.async_refresh()
+        if not self.last_update_success:
+            raise UpdateFailed(
+                "The hub write completed, but entity refresh failed. "
+                "Rescan before retrying the write."
+            ) from self.last_exception
 
     async def async_shutdown(self) -> None:
         """Close only resources owned by this integration."""
-        await self.api.async_close()
+        await super().async_shutdown()
+        try:
+            await self.manager.async_shutdown()
+        finally:
+            await self.api.async_close()

@@ -156,13 +156,17 @@ class TapoIrAcClimate(
         return super().available and self._device is not None
 
     @property
-    def hvac_mode(self) -> HVACMode:
-        if self._state.get("P", 0) == 0:
+    def hvac_mode(self) -> HVACMode | None:
+        if self._state.get("P") == 0:
             return HVACMode.OFF
-        return _TAPO_TO_HVAC.get(self._state.get("M", 0), HVACMode.COOL)
+        if self._state.get("P") != 1:
+            return None
+        return _TAPO_TO_HVAC.get(self._state.get("M"))
 
     @property
-    def hvac_action(self) -> HVACAction:
+    def hvac_action(self) -> HVACAction | None:
+        if self.hvac_mode is None:
+            return None
         return {
             HVACMode.OFF: HVACAction.OFF,
             HVACMode.COOL: HVACAction.COOLING,
@@ -276,13 +280,25 @@ class TapoIrAcClimate(
             raise HomeAssistantError(
                 f"Target temperature must be {self.min_temp}-{self.max_temp} °C"
             )
+
         self._last_temperature = float(rounded)
-        if self.hvac_mode in _NON_TEMPERATURE_HVAC_MODES:
+        changes: dict[str, Any] = {"temp": rounded}
+        if (hvac_mode := kwargs.get("hvac_mode")) is not None:
+            if hvac_mode == HVACMode.OFF:
+                changes["power"] = False
+            elif hvac_mode in _HVAC_TO_TAPO:
+                changes.update(power=True, mode=_HVAC_TO_TAPO[hvac_mode])
+                if hvac_mode in _NON_TEMPERATURE_HVAC_MODES:
+                    changes["temp"] = -1
+            else:
+                raise HomeAssistantError(f"Unsupported AC mode: {hvac_mode}")
+        elif self.hvac_mode in _NON_TEMPERATURE_HVAC_MODES:
             self.async_write_ha_state()
             return
+
         await self._async_control_ac(
-            temp=rounded,
             pressed_fid=3,
+            **changes,
         )
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:

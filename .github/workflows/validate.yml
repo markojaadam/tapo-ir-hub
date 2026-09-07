@@ -4,7 +4,7 @@ on:
   pull_request:
   push:
     branches:
-      - main
+      - develop
 
 permissions:
   contents: read
@@ -26,3 +26,7 @@ jobs:
         run: python -m compileall -q custom_components/tapo_ir
       - name: Check control card syntax
         run: node --check custom_components/tapo_ir/frontend/tapo-ir-control-card.js
+      - name: Check optional remote card syntax
+        run: node --check lovelace/tapo-ir-card.js
+      - name: Test card and visual editor contract
+        run: node tests/test_card.mjs

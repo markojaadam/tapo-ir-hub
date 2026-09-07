@@ -95,13 +95,77 @@ def _find_remote(
 
 def _find_key(remote: Mapping[str, Any], key_reference: str) -> dict[str, Any]:
     wanted = key_reference.casefold()
-    for key in remote.get("key_list") or []:
-        if str(key.get("name", "")).casefold() == wanted:
-            return deepcopy(key)
-        if _decode_b64(key.get("display_name")).casefold() == wanted:
-            return deepcopy(key)
+    keys = remote.get("key_list") or []
+    matches = [key for key in keys if str(key.get("name", "")).casefold() == wanted]
+    if not matches:
+        matches = [
+            key for key in keys
+            if _decode_b64(key.get("display_name")).casefold() == wanted
+        ]
+    if len(matches) == 1:
+        return deepcopy(matches[0])
+    if matches:
+        raise HomeAssistantError(f"Key reference {key_reference!r} is ambiguous")
     raise HomeAssistantError(
         f"Key {key_reference!r} was not found on {_device_id(remote)}"
+    )
+
+
+def _key_identity(key: Mapping[str, Any]) -> tuple[Any, str]:
+    """Return stable-enough identity for before/after key comparisons."""
+    return key.get("id"), str(key.get("name", "")).casefold()
+
+
+def _resolve_saved_key(
+    remote: Mapping[str, Any],
+    requested: Mapping[str, Any],
+    before_identities: set[tuple[Any, str]],
+    display_name: str,
+    code: Mapping[str, Any],
+    *,
+    creating: bool = False,
+) -> dict[str, Any]:
+    """Resolve a key even when the hub replaces its provisional name."""
+    keys = [deepcopy(key) for key in remote.get("key_list") or []]
+    if creating:
+        keys = [key for key in keys if _key_identity(key) not in before_identities]
+    requested_name = str(requested.get("name", "")).casefold()
+    exact_name = [
+        key
+        for key in keys
+        if str(key.get("name", "")).casefold() == requested_name
+    ]
+    if len(exact_name) == 1:
+        return exact_name[0]
+
+    matching_code = [
+        key
+        for key in keys
+        if key.get("pwm") == code["pwm"]
+        and (
+            key.get("pulse") is None
+            or str(key.get("pulse")) == code["pulse"]
+        )
+    ]
+    matching_label = [
+        key
+        for key in matching_code
+        if _decode_b64(key.get("display_name")) == display_name
+    ]
+    if len(matching_label) == 1:
+        return matching_label[0]
+
+    new_matching_keys = [
+        key
+        for key in matching_code
+        if _key_identity(key) not in before_identities
+    ]
+    if len(new_matching_keys) == 1:
+        return new_matching_keys[0]
+
+    raise HomeAssistantError(
+        "The hub accepted the button but its saved identity could not be "
+        "resolved unambiguously"
     )
 
 
@@ -151,12 +215,16 @@ def _find_created_id(response: Any) -> str | None:
 class IRTransactionManager:
     """Serialize mutations and verify every saved result from the hub."""
 
-    def __init__(self, hass: HomeAssistant, api: Any) -> None:
+    def __init__(
+        self, hass: HomeAssistant, api: Any, entry_id: str | None = None
+    ) -> None:
         self._hass = hass
         self.api = api
+        self._entry_id = entry_id
         self._lock = asyncio.Lock()
         self._stop_learning: asyncio.Event | None = None
         self._learning_remote_id: str | None = None
+        self._learning_task: asyncio.Task | None = None
 
     def _audit(self, action: str, **data: Any) -> None:
         self._hass.bus.async_fire(
@@ -200,6 +268,15 @@ class IRTransactionManager:
             raise HomeAssistantError("Remote name must contain 1 to 64 characters")
         if not initial_keys:
             raise HomeAssistantError("A new remote requires at least one button")
+        for key in initial_keys:
+            if not 1 <= len(clean_text(key["label"])) <= 64:
+                raise HomeAssistantError("Button name must contain 1 to 64 characters")
+            try:
+                code = parse_code_text(key["code"])
+                if key.get("trim_silence", False):
+                    trim_numeric_silence(code["pulse"])
+            except IrCodeError as err:
+                raise HomeAssistantError(str(err)) from err
 
         async with self._lock:
             before_raw = await self._raw()
@@ -222,8 +299,6 @@ class IRTransactionManager:
             }
             candidates = marked_ids | ({response_id} & new_ids)
             created_id = next(iter(candidates)) if len(candidates) == 1 else None
-            if created_id is None and len(new_ids) == 1:
-                created_id = new_ids.pop() if len(new_ids) == 1 else None
             if created_id is None:
                 for candidate_id in marked_ids:
                     await self.api.async_query_child(candidate_id, "deleteRemote")
@@ -234,14 +309,15 @@ class IRTransactionManager:
                 )
 
             try:
+                saved_keys = []
                 for key in initial_keys:
-                    await self._save_key_locked(
+                    saved_keys.append(await self._save_key_locked(
                         created_id,
                         None,
                         key["label"],
                         key["code"],
                         bool(key.get("trim_silence", False)),
-                    )
+                    ))
                 current = _find_remote(await self._raw(), created_id)
                 if not current.get("key_list"):
                     raise HomeAssistantError(
@@ -263,10 +339,12 @@ class IRTransactionManager:
                         raise HomeAssistantError(
                             f"Remote creation unexpectedly changed {device_id}"
                         )
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 try:
                     await self.api.async_query_child(created_id, "deleteRemote")
-                    await self._raw()
+                    remaining = _snapshot(await self._raw())
+                    if created_id in remaining:
+                        raise HomeAssistantError("Incomplete remote remains on the hub")
                 except Exception as cleanup_error:
                     raise HomeAssistantError(
                         f"Remote creation failed and cleanup also failed: {cleanup_error}"
@@ -278,6 +356,7 @@ class IRTransactionManager:
                 "remote_device_id": created_id,
                 "name": name,
                 "key_count": len(initial_keys),
+                "keys": saved_keys,
                 "verified": True,
             }
 
@@ -307,6 +386,10 @@ class IRTransactionManager:
                 "type": "",
             }
             action = "create_key"
+        before_identities = {
+            _key_identity(item)
+            for item in remote.get("key_list") or []
+        }
 
         try:
             code = parse_code_text(code_text, fallback_pwm=key.get("pwm"))
@@ -329,12 +412,25 @@ class IRTransactionManager:
             {"delete_key_list": [], "edit_key_list": [key]},
         )
 
-        saved_remote = _find_remote(await self._raw(), remote_device_id)
-        saved = _find_key(saved_remote, str(key["name"]))
+        saved_remote = await self.api.async_get_raw_remote(
+            remote_device_id
+        )
+        saved = _resolve_saved_key(
+            saved_remote,
+            key,
+            before_identities,
+            display_name,
+            code,
+            creating=not key_reference,
+        )
+        saved_pulse = saved.get("pulse")
         if (
             saved.get("pwm") != code["pwm"]
-            or str(saved.get("pulse")) != code["pulse"]
             or _decode_b64(saved.get("display_name")) != display_name
+            or (
+                saved_pulse is not None
+                and str(saved_pulse) != code["pulse"]
+            )
         ):
             raise HomeAssistantError(
                 f"Button {key['name']!r} failed read-back verification"
@@ -342,14 +438,18 @@ class IRTransactionManager:
         self._audit(
             action,
             remote_device_id=remote_device_id,
-            key_name=key["name"],
+            key_name=saved["name"],
         )
         return {
             "remote_device_id": remote_device_id,
-            "key_name": key["name"],
+            "key_name": saved["name"],
             "display_name": display_name,
-            "code": serialize_code(saved.get("pwm"), saved.get("pulse")),
+            "code": serialize_code(
+                saved.get("pwm"),
+                saved_pulse if saved_pulse is not None else code["pulse"],
+            ),
             "verified": True,
+            "waveform_verified": saved_pulse is not None,
         }
 
     async def async_save_key(
@@ -361,6 +461,8 @@ class IRTransactionManager:
         trim_silence: bool = False,
     ) -> dict[str, Any]:
         """Create or update a key and verify its exact waveform."""
+        if self._stop_learning is not None:
+            raise HomeAssistantError("Stop learning before saving a button")
         async with self._lock:
             return await self._save_key_locked(
                 remote_device_id,
@@ -376,49 +478,74 @@ class IRTransactionManager:
         """Capture one signal without saving or transmitting it."""
         if not 5 <= timeout <= 120:
             raise HomeAssistantError("Learning timeout must be 5 to 120 seconds")
+        if self._lock.locked():
+            raise HomeAssistantError("Another IR management operation is in progress")
         async with self._lock:
             if remote_device_id is not None:
                 _find_remote(await self._raw(), remote_device_id)
             stop_event = self._stop_learning = asyncio.Event()
             self._learning_remote_id = remote_device_id
-            await self.api.async_query_hub("startIrReceiveMode")
+            self._learning_task = asyncio.current_task()
             try:
-                deadline = time.monotonic() + timeout
-                while time.monotonic() < deadline:
-                    if stop_event.is_set():
-                        raise HomeAssistantError("IR learning was stopped")
-                    status = await self.api.async_query_hub("getIrReceiveStatus")
-                    receive_status = status.get("recv_status")
-                    pwm = status.get("pwm")
-                    pulse = status.get("pulse")
-                    if receive_status == 0 and isinstance(pwm, int) and pulse:
-                        code = serialize_code(pwm, str(pulse))
-                        self._audit(
-                            "capture_signal",
-                            remote_device_id=remote_device_id,
-                            pwm=pwm,
-                        )
-                        return {"code": code, "verified": True}
-                    if receive_status == -2:
-                        raise HomeAssistantError(
-                            "The hub reported an invalid or unusable IR signal"
-                        )
-                    await asyncio.sleep(0.5)
+                async with asyncio.timeout(timeout):
+                    await self.api.async_query_hub("startIrReceiveMode")
+                    while True:
+                        if stop_event.is_set():
+                            raise HomeAssistantError("IR learning was stopped")
+                        status = await self.api.async_query_hub("getIrReceiveStatus")
+                        if stop_event.is_set():
+                            raise HomeAssistantError("IR learning was stopped")
+                        receive_status = status.get("recv_status")
+                        pwm = status.get("pwm")
+                        pulse = status.get("pulse")
+                        if receive_status == 0 and pulse:
+                            try:
+                                code = serialize_code(pwm, pulse)
+                                parse_code_text(code)
+                            except IrCodeError as err:
+                                raise HomeAssistantError(str(err)) from err
+                            self._audit(
+                                "capture_signal", remote_device_id=remote_device_id, pwm=pwm
+                            )
+                            return {"code": code, "verified": True}
+                        if receive_status == -2:
+                            raise HomeAssistantError(
+                                "The hub reported an invalid or unusable IR signal"
+                            )
+                        await asyncio.sleep(0.5)
+            except TimeoutError as err:
                 raise HomeAssistantError(
                     f"No IR signal was received within {timeout} seconds"
-                )
+                ) from err
             finally:
-                await self.api.async_query_hub("stopIrReceiveMode")
-                self._stop_learning = None
-                self._learning_remote_id = None
+                try:
+                    async with asyncio.timeout(10):
+                        await self.api.async_query_hub("stopIrReceiveMode")
+                except TimeoutError as err:
+                    raise HomeAssistantError(
+                        "Timed out stopping IR receive mode; check the hub before learning again"
+                    ) from err
+                finally:
+                    self._stop_learning = None
+                    self._learning_remote_id = None
+                    self._learning_task = None
 
     async def async_stop_learning(self) -> bool:
         """Stop an active capture as soon as the protocol lock is available."""
         if self._stop_learning is None:
             return False
         self._stop_learning.set()
-        await self.api.async_query_hub("stopIrReceiveMode")
         return True
+
+    async def async_shutdown(self) -> None:
+        """Cancel a capture and finish receive-mode cleanup before closing the API."""
+        task = self._learning_task
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     async def async_rename_remote(
         self, remote_device_id: str, name: str
@@ -442,7 +569,7 @@ class IRTransactionManager:
     ) -> dict[str, Any]:
         """Delete one key and verify it is gone."""
         async with self._lock:
-            remote = _find_remote(await self._raw(), remote_device_id)
+            remote = await self.api.async_get_raw_remote(remote_device_id)
             key = _find_key(remote, key_reference)
             await self.api.async_query_child(
                 remote_device_id,
@@ -452,7 +579,12 @@ class IRTransactionManager:
                     "edit_key_list": [],
                 },
             )
-            current = _find_remote(await self._raw(), remote_device_id)
+            current = await self.api.async_get_raw_remote(remote_device_id)
+            if not isinstance(current.get("key_list"), list):
+                raise HomeAssistantError(
+                    "Deletion was sent, but the hub did not return a button list "
+                    "to verify removal. Reload before retrying."
+                )
             if any(
                 item.get("name") == key["name"]
                 for item in current.get("key_list") or []
@@ -496,6 +628,11 @@ class IRTransactionManager:
             for entry in list(
                 er.async_entries_for_device(entity_registry, device.id)
             ):
-                entity_registry.async_remove(entry.entity_id)
-                self._hass.states.async_remove(entry.entity_id)
-            device_registry.async_remove_device(device.id)
+                if entry.platform == DOMAIN and (
+                    self._entry_id is None or entry.config_entry_id == self._entry_id
+                ):
+                    entity_registry.async_remove(entry.entity_id)
+            if self._entry_id is not None and self._entry_id in device.config_entries:
+                device_registry.async_update_device(
+                    device.id, remove_config_entry_id=self._entry_id
+                )
